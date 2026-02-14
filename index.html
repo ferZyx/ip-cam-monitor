@@ -543,6 +543,11 @@
       let reconnectTimer = null;
       let currentCamMode = "full";
 
+      // Health check: /status.frame_count должен расти.
+      let lastFrameCount = -1;
+      let lastFrameTickMs = Date.now();
+      let lastHealthWarnMs = 0;
+
       // ─── Логирование ─────────────────────────────────────────────────────────────
       function addLog(msg, level = "") {
         const time = new Date().toLocaleTimeString("ru-RU");
@@ -591,6 +596,43 @@
           camFrames.textContent =
             data.frame_count > 0 ? data.frame_count.toLocaleString() : "—";
 
+          // ─── Stream health: если кадры не меняются, форсим переподключение ──
+          if (typeof data.frame_count === "number") {
+            if (lastFrameCount === -1) {
+              lastFrameCount = data.frame_count;
+              lastFrameTickMs = Date.now();
+            } else if (data.frame_count > lastFrameCount) {
+              lastFrameCount = data.frame_count;
+              lastFrameTickMs = Date.now();
+            } else if (data.frame_count < lastFrameCount) {
+              // Сервер перезапустился (счётчик сбросился)
+              lastFrameCount = data.frame_count;
+              lastFrameTickMs = Date.now();
+              if (data.status === "streaming") {
+                streamConnected = false;
+                streamStarting = false;
+                startStream();
+              }
+            }
+
+            const noFramesMs = Date.now() - lastFrameTickMs;
+            if (data.status === "streaming" && noFramesMs > 8000) {
+              // Важно: onerror у MJPEG <img> может не сработать при рестарте бэка,
+              // поэтому используем frame_count как источник истины.
+              if (Date.now() - lastHealthWarnMs > 15000) {
+                addLog("Поток завис (кадры не обновляются) — переподключаю...", "warn");
+                lastHealthWarnMs = Date.now();
+              }
+              streamConnected = false;
+              streamStarting = false;
+              if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+              }
+              startStream();
+            }
+          }
+
           const statusLabels = {
             init: "Инициализация",
             scanning: "Поиск камеры...",
@@ -637,12 +679,19 @@
           footerStatus.textContent =
             "Бэкенд недоступен — автопереподключение...";
           updateOverlay({ status: "backend_down" });
-          addLog("Бэкенд недоступен, повторная попытка...", "error");
+          // Не спамим лог каждую итерацию
+          if (Date.now() - lastHealthWarnMs > 15000) {
+            addLog("Бэкенд недоступен, повторная попытка...", "error");
+            lastHealthWarnMs = Date.now();
+          }
         }
       }
 
       function updateOverlay(data) {
-        if (data.status === "streaming" && streamConnected) {
+        // Скрываем оверлей только когда реально есть живой поток
+        // (и статус streaming, и картинка подключена, и кадры обновляются)
+        const healthy = Date.now() - lastFrameTickMs < 8000;
+        if (data.status === "streaming" && streamConnected && healthy) {
           overlay.classList.add("hidden");
           return;
         }
@@ -755,6 +804,41 @@
           wrap.requestFullscreen().catch(() => {});
         } else {
           document.exitFullscreen();
+        }
+      }
+
+      function wantFullscreenFromUrl() {
+        try {
+          const params = new URLSearchParams(window.location.search || "");
+          const v = (params.get("fullscreen") || "").toLowerCase();
+          return v === "1" || v === "true" || v === "yes" || v === "on";
+        } catch {
+          return false;
+        }
+      }
+
+      async function tryEnterFullscreen(reason = "") {
+        const wrap = document.getElementById("streamWrap");
+        if (!wrap || document.fullscreenElement) return;
+        try {
+          await wrap.requestFullscreen();
+          addLog("Полный экран включен" + (reason ? ` (${reason})` : ""), "ok");
+        } catch (e) {
+          // Большинство браузеров блокирует fullscreen без жеста пользователя.
+          addLog(
+            "Авто fullscreen заблокирован браузером — кликни по странице для полного экрана",
+            "warn",
+          );
+          const once = () => {
+            wrap
+              .requestFullscreen()
+              .then(() => addLog("Полный экран включен", "ok"))
+              .catch(() => {});
+            window.removeEventListener("click", once);
+            window.removeEventListener("keydown", once);
+          };
+          window.addEventListener("click", once);
+          window.addEventListener("keydown", once);
         }
       }
 
@@ -903,6 +987,12 @@
       addLog("Stream Viewer запущен");
       pollStatus();
       setInterval(pollStatus, STATUS_POLL_MS);
+
+      // Авто fullscreen по параметру URL (?fullscreen=true)
+      if (wantFullscreenFromUrl()) {
+        // не мешаем первоначальной загрузке DOM
+        setTimeout(() => tryEnterFullscreen("URL параметр"), 500);
+      }
 
       // Переподключение при возврате на вкладку
       document.addEventListener("visibilitychange", () => {

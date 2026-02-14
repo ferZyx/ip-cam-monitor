@@ -23,6 +23,10 @@ if %errorlevel% neq 0 (
     echo.
 )
 
+:: Открываем фронт в браузере через 30 секунд (один раз)
+:: Параметр fullscreen=true будет обработан фронтом.
+start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 30; Start-Process 'http://localhost:5050/?fullscreen=true'"
+
 :: Бесконечный цикл — самовосстановление при падении
 :loop
 echo [%date% %time%] Запуск сервера...
