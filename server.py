@@ -141,7 +141,8 @@ class CameraState:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.frame: bytes | None = None
+        self.frame: bytes | None = None  # JPEG bytes
+        self.frame_bgr = None  # last BGR frame (optional)
         self.frame_event = threading.Event()
         self.camera_ip: str | None = None
         self.status: str = "init"  # init | scanning | connecting | streaming | error
@@ -153,9 +154,10 @@ class CameraState:
         self.frame_count: int = 0
         self.clients: int = 0
 
-    def set_frame(self, jpeg_bytes: bytes):
+    def set_frame(self, jpeg_bytes: bytes, bgr_frame=None):
         with self.lock:
             self.frame = jpeg_bytes
+            self.frame_bgr = bgr_frame
             self.frame_count += 1
         self.frame_event.set()
         self.frame_event.clear()
@@ -163,6 +165,10 @@ class CameraState:
     def get_frame(self) -> bytes | None:
         with self.lock:
             return self.frame
+
+    def get_frame_bgr(self):
+        with self.lock:
+            return self.frame_bgr
 
     def set_status(self, status: str, error: str = ""):
         self.status = status
@@ -424,7 +430,7 @@ def rtsp_read_loop(cap: cv2.VideoCapture):
             if not ok:
                 continue
 
-            state.set_frame(jpeg.tobytes())
+            state.set_frame(jpeg.tobytes(), bgr_frame=frame)
 
             if not state.resolution:
                 h, w = frame.shape[:2]
@@ -1016,20 +1022,63 @@ def index():
 def stream():
     """MJPEG-поток для <img> тега."""
 
+    cam_mode = (request.args.get("cam", "full") or "full").lower()
+    if cam_mode not in {"full", "top", "bottom"}:
+        cam_mode = "full"
+
+    def crop_bgr(bgr, mode: str):
+        if mode == "full" or bgr is None:
+            return bgr
+        h = int(bgr.shape[0])
+        if h < 2:
+            return bgr
+        mid = h // 2
+        if mode == "top":
+            return bgr[:mid, :, :]
+        if mode == "bottom":
+            return bgr[mid:, :, :]
+        return bgr
+
+    def to_jpeg_bytes(bgr) -> bytes | None:
+        if bgr is None:
+            return None
+        ok, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if not ok:
+            return None
+        return jpeg.tobytes()
+
     def generate():
         state.clients += 1
         log.info(f"Клиент подключился (всего: {state.clients})")
         try:
             while True:
                 state.frame_event.wait(timeout=2.0)
-                frame = state.get_frame()
-                if frame is None:
+                frame_jpeg = state.get_frame()
+                if frame_jpeg is None:
                     continue
+
+                out_jpeg = frame_jpeg
+                if cam_mode != "full":
+                    bgr = state.get_frame_bgr()
+                    if bgr is None:
+                        try:
+                            import numpy as np
+
+                            arr = np.frombuffer(frame_jpeg, dtype=np.uint8)
+                            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        except Exception:
+                            bgr = None
+
+                    out_bgr = crop_bgr(bgr, cam_mode)
+                    maybe = to_jpeg_bytes(out_bgr)
+                    if maybe:
+                        out_jpeg = maybe
+
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n"
-                    b"Content-Length: " + str(len(frame)).encode() + b"\r\n"
-                    b"\r\n" + frame + b"\r\n"
+                    b"Content-Length: " + str(len(out_jpeg)).encode() + b"\r\n"
+                    b"\r\n" + out_jpeg + b"\r\n"
                 )
         except GeneratorExit:
             pass
@@ -1052,10 +1101,49 @@ def stream():
 @app.route("/snapshot")
 def snapshot():
     """Текущий кадр как JPEG."""
-    frame = state.get_frame()
-    if frame is None:
+    cam_mode = (request.args.get("cam", "full") or "full").lower()
+    if cam_mode not in {"full", "top", "bottom"}:
+        cam_mode = "full"
+
+    frame_jpeg = state.get_frame()
+    if frame_jpeg is None:
         return "Нет кадра", 503
-    return Response(frame, mimetype="image/jpeg", headers={"Cache-Control": "no-cache"})
+
+    if cam_mode == "full":
+        return Response(
+            frame_jpeg, mimetype="image/jpeg", headers={"Cache-Control": "no-cache"}
+        )
+
+    bgr = state.get_frame_bgr()
+    if bgr is None:
+        try:
+            import numpy as np
+
+            arr = np.frombuffer(frame_jpeg, dtype=np.uint8)
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        except Exception:
+            bgr = None
+
+    if bgr is None:
+        return Response(
+            frame_jpeg, mimetype="image/jpeg", headers={"Cache-Control": "no-cache"}
+        )
+
+    h = int(bgr.shape[0])
+    mid = h // 2 if h >= 2 else 0
+    if cam_mode == "top":
+        bgr = bgr[:mid, :, :]
+    elif cam_mode == "bottom":
+        bgr = bgr[mid:, :, :]
+
+    ok, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    if not ok:
+        return Response(
+            frame_jpeg, mimetype="image/jpeg", headers={"Cache-Control": "no-cache"}
+        )
+    return Response(
+        jpeg.tobytes(), mimetype="image/jpeg", headers={"Cache-Control": "no-cache"}
+    )
 
 
 @app.route("/status")

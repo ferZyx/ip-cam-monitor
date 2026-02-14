@@ -148,27 +148,6 @@
         max-height: none;
         object-fit: none; /* 1:1 пиксели */
       }
-      /* Камера 1 (верхняя половина) */
-      .view-cam1 #stream {
-        position: absolute;
-        left: 0;
-        width: 100%;
-        height: 200%; /* растягиваем x2, показываем верхнюю */
-        top: 0;
-        object-fit: cover;
-        object-position: top center;
-      }
-      /* Камера 2 (нижняя половина) */
-      .view-cam2 #stream {
-        position: absolute;
-        left: 0;
-        width: 100%;
-        height: 200%;
-        bottom: 0;
-        top: auto;
-        object-fit: cover;
-        object-position: bottom center;
-      }
 
       /* ─── Overlay (когда нет потока) ──────── */
       .overlay {
@@ -474,8 +453,16 @@
           <option value="contain">🔲 Пропорционально</option>
           <option value="fill">🔳 Заполнить</option>
           <option value="original">🔍 Оригинал</option>
-          <option value="cam1">🎥 Камера 1 (верх)</option>
-          <option value="cam2">🎥 Камера 2 (низ)</option>
+        </select>
+        <select
+          class="btn"
+          id="camMode"
+          onchange="setCamMode(this.value)"
+          title="Кадр: все/верх/низ"
+        >
+          <option value="full" selected>📷 Весь кадр</option>
+          <option value="top">⬆ Верх (камера верх)</option>
+          <option value="bottom">⬇ Низ (камера низ)</option>
         </select>
       </div>
     </div>
@@ -554,6 +541,7 @@
       let lastStatus = "init";
       let streamConnected = false;
       let reconnectTimer = null;
+      let currentCamMode = "full";
 
       // ─── Логирование ─────────────────────────────────────────────────────────────
       function addLog(msg, level = "") {
@@ -701,7 +689,7 @@
         if (streamStarting) return; // не спамить
         streamStarting = true;
 
-        const url = `/stream?t=${Date.now()}`;
+        const url = `/stream?cam=${encodeURIComponent(currentCamMode)}&t=${Date.now()}`;
         addLog("Подключение к MJPEG-потоку...");
 
         // Сбрасываем старые обработчики
@@ -755,7 +743,7 @@
       // ─── Кнопки ──────────────────────────────────────────────────────────────────
       function takeSnapshot() {
         const a = document.createElement("a");
-        a.href = "/snapshot";
+        a.href = `/snapshot?cam=${encodeURIComponent(currentCamMode)}`;
         a.download = `snapshot_${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
         a.click();
         addLog("Снимок сохранён");
@@ -788,9 +776,28 @@
               contain: "Пропорционально",
               fill: "Заполнить (обрезка)",
               original: "Оригинал 1:1",
-              cam1: "Камера 1 (верхняя)",
-              cam2: "Камера 2 (нижняя)",
             }[mode],
+        );
+      }
+
+      function setCamMode(mode) {
+        currentCamMode = mode || "full";
+        localStorage.setItem("camMode", currentCamMode);
+        // Переподключаем поток, чтобы применить ?cam=...
+        streamConnected = false;
+        streamStarting = false;
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        startStream();
+        addLog(
+          "Кадр: " +
+            {
+              full: "Весь кадр",
+              top: "Верх",
+              bottom: "Низ",
+            }[currentCamMode],
         );
       }
 
@@ -800,6 +807,12 @@
         if (saved) {
           document.getElementById("viewMode").value = saved;
           setViewMode(saved);
+        }
+
+        const savedCam = localStorage.getItem("camMode");
+        if (savedCam) {
+          document.getElementById("camMode").value = savedCam;
+          currentCamMode = savedCam;
         }
       })();
       // ─── Тревоги ────────────────────────────────────────────────────────────────
