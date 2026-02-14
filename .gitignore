@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.so
+.pytest_cache/
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+
+# Env files / secrets
+.env
+.env.*
+!.env.example
+
+# Local outputs
+alarm_photos/
+*.h264
+*.bin
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

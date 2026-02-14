@@ -1,0 +1,905 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stream Viewer</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      :root {
+        --bg: #0d1117;
+        --surface: #161b22;
+        --border: #30363d;
+        --text: #e6edf3;
+        --text-dim: #7d8590;
+        --green: #3fb950;
+        --red: #f85149;
+        --yellow: #d29922;
+        --blue: #58a6ff;
+      }
+
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+          sans-serif;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ─── Header ──────────────────────────── */
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 20px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+
+      .header h1 {
+        font-size: 18px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        display: inline-block;
+        background: var(--text-dim);
+        transition: background 0.3s;
+      }
+      .status-dot.streaming {
+        background: var(--green);
+        box-shadow: 0 0 8px var(--green);
+      }
+      .status-dot.scanning,
+      .status-dot.connecting {
+        background: var(--yellow);
+        animation: pulse 1s infinite;
+      }
+      .status-dot.error {
+        background: var(--red);
+        animation: pulse 0.5s infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+
+      .header-info {
+        display: flex;
+        gap: 20px;
+        font-size: 13px;
+        color: var(--text-dim);
+      }
+
+      .header-info span {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .header-info .val {
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ─── Stream ──────────────────────────── */
+      .stream-wrap {
+        flex: 1;
+        position: relative;
+        overflow: hidden;
+      }
+
+      #stream {
+        border-radius: 0;
+        background: #000;
+        display: block;
+      }
+
+      /* Режимы отображения */
+      .view-fit #stream {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: fill; /* деформирует под экран */
+      }
+      .view-fill #stream {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover; /* обрезает края, без полос */
+      }
+      .view-contain #stream {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: contain; /* чёрные полосы, без деформации */
+      }
+      .view-original #stream {
+        position: static;
+        width: auto;
+        height: auto;
+        max-width: none;
+        max-height: none;
+        object-fit: none; /* 1:1 пиксели */
+      }
+      /* Камера 1 (верхняя половина) */
+      .view-cam1 #stream {
+        position: absolute;
+        left: 0;
+        width: 100%;
+        height: 200%; /* растягиваем x2, показываем верхнюю */
+        top: 0;
+        object-fit: cover;
+        object-position: top center;
+      }
+      /* Камера 2 (нижняя половина) */
+      .view-cam2 #stream {
+        position: absolute;
+        left: 0;
+        width: 100%;
+        height: 200%;
+        bottom: 0;
+        top: auto;
+        object-fit: cover;
+        object-position: bottom center;
+      }
+
+      /* ─── Overlay (когда нет потока) ──────── */
+      .overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: rgba(13, 17, 23, 0.92);
+        z-index: 10;
+        transition: opacity 0.4s;
+        pointer-events: none;
+      }
+      .overlay.hidden {
+        opacity: 0;
+      }
+
+      .overlay-icon {
+        font-size: 48px;
+        margin-bottom: 16px;
+      }
+
+      .overlay h2 {
+        font-size: 20px;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+
+      .overlay p {
+        color: var(--text-dim);
+        font-size: 14px;
+        text-align: center;
+        max-width: 400px;
+        line-height: 1.5;
+      }
+
+      .spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid var(--border);
+        border-top-color: var(--blue);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin-bottom: 16px;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* ─── Footer ──────────────────────────── */
+      .footer {
+        padding: 8px 20px;
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--text-dim);
+        display: flex;
+        justify-content: space-between;
+        flex-shrink: 0;
+      }
+
+      .footer a {
+        color: var(--blue);
+        text-decoration: none;
+      }
+
+      /* ─── Controls ────────────────────────── */
+      .controls {
+        display: flex;
+        gap: 8px;
+      }
+
+      .btn {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 5px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+        transition: background 0.2s;
+      }
+      .btn:hover {
+        background: var(--border);
+      }
+
+      /* ─── Log panel ───────────────────────── */
+      .log-panel {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.3s;
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+      }
+      .log-panel.open {
+        max-height: 200px;
+      }
+
+      .log-content {
+        padding: 10px 20px;
+        font-family: "Cascadia Code", "Fira Code", monospace;
+        font-size: 12px;
+        color: var(--text-dim);
+        overflow-y: auto;
+        max-height: 180px;
+        line-height: 1.6;
+      }
+
+      .log-content .log-error {
+        color: var(--red);
+      }
+      .log-content .log-ok {
+        color: var(--green);
+      }
+      .log-content .log-warn {
+        color: var(--yellow);
+      }
+
+      /* ─── Alarm panel ─────────────────────── */
+      .alarm-panel {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.3s;
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+      }
+      .alarm-panel.open {
+        max-height: 400px;
+      }
+
+      .alarm-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 20px;
+        border-bottom: 1px solid var(--border);
+        font-size: 13px;
+      }
+      .alarm-header .alarm-badge {
+        background: var(--red);
+        color: #fff;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      .alarm-list {
+        padding: 0;
+        margin: 0;
+        list-style: none;
+        overflow-y: auto;
+        max-height: 350px;
+      }
+
+      .alarm-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 20px;
+        border-bottom: 1px solid var(--border);
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .alarm-item:hover {
+        background: rgba(88, 166, 255, 0.08);
+      }
+
+      .alarm-thumb {
+        width: 80px;
+        height: 60px;
+        border-radius: 4px;
+        object-fit: cover;
+        background: #000;
+        border: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+
+      .alarm-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .alarm-info .alarm-type {
+        font-weight: 600;
+        color: var(--red);
+      }
+      .alarm-info .alarm-time {
+        color: var(--text-dim);
+        font-size: 12px;
+      }
+      .alarm-info .alarm-file {
+        color: var(--text-dim);
+        font-size: 11px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .alarm-empty {
+        padding: 30px 20px;
+        text-align: center;
+        color: var(--text-dim);
+        font-size: 13px;
+      }
+
+      /* ─── Alarm photo modal ──────────────── */
+      .alarm-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        background: rgba(0, 0, 0, 0.85);
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+      .alarm-modal.show {
+        display: flex;
+      }
+      .alarm-modal img {
+        max-width: 90vw;
+        max-height: 90vh;
+        border-radius: 8px;
+        border: 2px solid var(--border);
+      }
+      .alarm-modal-info {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--surface);
+        padding: 8px 20px;
+        border-radius: 8px;
+        font-size: 13px;
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+
+      /* ─── Responsive ──────────────────────── */
+      @media (max-width: 600px) {
+        .header {
+          flex-direction: column;
+          gap: 8px;
+        }
+        .header-info {
+          gap: 12px;
+          font-size: 12px;
+          flex-wrap: wrap;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>
+        <span class="status-dot" id="statusDot"></span>
+        <span>Stream Viewer</span>
+        <span
+          id="statusText"
+          style="font-weight: 400; font-size: 13px; color: var(--text-dim)"
+        ></span>
+      </h1>
+      <div class="header-info">
+        <span>IP: <b class="val" id="camIp">—</b></span>
+        <span>FPS: <b class="val" id="camFps">—</b></span>
+        <span>Разрешение: <b class="val" id="camRes">—</b></span>
+        <span>Аптайм: <b class="val" id="camUptime">—</b></span>
+        <span>Кадров: <b class="val" id="camFrames">—</b></span>
+      </div>
+      <div class="controls">
+        <button
+          class="btn"
+          onclick="takeSnapshot()"
+          title="Скачать текущий кадр"
+        >
+          📷 Снимок
+        </button>
+        <button class="btn" onclick="toggleFullscreen()" title="Полный экран">
+          ⛶ Экран
+        </button>
+        <button class="btn" onclick="toggleLog()" title="Показать лог">
+          📋 Лог
+        </button>
+        <button
+          class="btn"
+          onclick="toggleAlarms()"
+          title="Тревоги"
+          id="alarmBtn"
+        >
+          🚨 Тревоги
+        </button>
+        <select
+          class="btn"
+          id="viewMode"
+          onchange="setViewMode(this.value)"
+          title="Режим отображения"
+        >
+          <option value="fit" selected>↔ Вписать</option>
+          <option value="contain">🔲 Пропорционально</option>
+          <option value="fill">🔳 Заполнить</option>
+          <option value="original">🔍 Оригинал</option>
+          <option value="cam1">🎥 Камера 1 (верх)</option>
+          <option value="cam2">🎥 Камера 2 (низ)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="stream-wrap view-fit" id="streamWrap">
+      <img id="stream" alt="Camera stream" />
+      <div class="overlay" id="overlay">
+        <div class="spinner" id="overlaySpinner"></div>
+        <h2 id="overlayTitle">Подключение...</h2>
+        <p id="overlayText">Ожидание потока с камеры</p>
+      </div>
+    </div>
+
+    <div class="log-panel" id="logPanel">
+      <div class="log-content" id="logContent"></div>
+    </div>
+
+    <div class="alarm-panel" id="alarmPanel">
+      <div class="alarm-header">
+        <span
+          >🚨 Тревоги <span class="alarm-badge" id="alarmCount">0</span></span
+        >
+        <span
+          id="alarmLastCheck"
+          style="color: var(--text-dim); font-size: 12px"
+          >—</span
+        >
+      </div>
+      <ul class="alarm-list" id="alarmList">
+        <li class="alarm-empty">Загрузка...</li>
+      </ul>
+    </div>
+
+    <!-- Модал для просмотра фото тревоги -->
+    <div class="alarm-modal" id="alarmModal" onclick="closeAlarmModal()">
+      <img id="alarmModalImg" onclick="event.stopPropagation()" />
+      <div
+        class="alarm-modal-info"
+        id="alarmModalInfo"
+        onclick="event.stopPropagation()"
+      ></div>
+    </div>
+
+    <div class="footer">
+      <span id="footerStatus">Инициализация...</span>
+      <span
+        >Stream Viewer v1.1 · <a href="/status" target="_blank">/status</a> ·
+        <a href="/snapshot" target="_blank">/snapshot</a> ·
+        <a href="/alarms" target="_blank">/alarms</a></span
+      >
+    </div>
+
+    <script>
+      // ─── Конфигурация ────────────────────────────────────────────────────────────
+      const STATUS_POLL_MS = 2000; // Опрос /status
+      const STREAM_RECONNECT_MS = 5000; // Задержка переподключения потока
+      const MAX_LOG = 100; // Макс строк в логе
+
+      // ─── Элементы ────────────────────────────────────────────────────────────────
+      const streamImg = document.getElementById("stream");
+      const overlay = document.getElementById("overlay");
+      const overlayTitle = document.getElementById("overlayTitle");
+      const overlayText = document.getElementById("overlayText");
+      const overlaySpinner = document.getElementById("overlaySpinner");
+      const statusDot = document.getElementById("statusDot");
+      const statusText = document.getElementById("statusText");
+      const camIp = document.getElementById("camIp");
+      const camFps = document.getElementById("camFps");
+      const camRes = document.getElementById("camRes");
+      const camUptime = document.getElementById("camUptime");
+      const camFrames = document.getElementById("camFrames");
+      const footerStatus = document.getElementById("footerStatus");
+      const logContent = document.getElementById("logContent");
+      const logPanel = document.getElementById("logPanel");
+
+      let lastStatus = "init";
+      let streamConnected = false;
+      let reconnectTimer = null;
+
+      // ─── Логирование ─────────────────────────────────────────────────────────────
+      function addLog(msg, level = "") {
+        const time = new Date().toLocaleTimeString("ru-RU");
+        const cls =
+          level === "error"
+            ? "log-error"
+            : level === "ok"
+              ? "log-ok"
+              : level === "warn"
+                ? "log-warn"
+                : "";
+        const div = document.createElement("div");
+        div.className = cls;
+        div.textContent = `[${time}] ${msg}`;
+        logContent.appendChild(div);
+        // Ограничиваем
+        while (logContent.children.length > MAX_LOG) {
+          logContent.removeChild(logContent.firstChild);
+        }
+        logContent.scrollTop = logContent.scrollHeight;
+      }
+
+      // ─── Статус ──────────────────────────────────────────────────────────────────
+      function formatUptime(seconds) {
+        if (!seconds) return "—";
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+      }
+
+      async function pollStatus() {
+        try {
+          const resp = await fetch("/status", {
+            signal: AbortSignal.timeout(3000),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+
+          // Обновляем UI
+          statusDot.className = "status-dot " + data.status;
+          camIp.textContent = data.camera_ip || "—";
+          camFps.textContent = data.fps > 0 ? data.fps : "—";
+          camRes.textContent = data.resolution || "—";
+          camUptime.textContent = formatUptime(data.uptime_seconds);
+          camFrames.textContent =
+            data.frame_count > 0 ? data.frame_count.toLocaleString() : "—";
+
+          const statusLabels = {
+            init: "Инициализация",
+            scanning: "Поиск камеры...",
+            connecting: "Подключение...",
+            streaming: "Трансляция",
+            error: "Ошибка",
+          };
+          statusText.textContent =
+            "· " + (statusLabels[data.status] || data.status);
+          footerStatus.textContent =
+            data.status === "streaming"
+              ? `Трансляция · ${data.camera_ip} · ${data.resolution} · ${data.fps} fps`
+              : data.error || statusLabels[data.status] || data.status;
+
+          // Логируем смену статуса
+          if (data.status !== lastStatus) {
+            if (data.status === "streaming") {
+              addLog(`Трансляция запущена (${data.camera_ip})`, "ok");
+            } else if (data.status === "error") {
+              addLog(`Ошибка: ${data.error}`, "error");
+            } else if (data.status === "scanning") {
+              addLog("Поиск камеры в сети...", "warn");
+            } else if (data.status === "connecting") {
+              addLog(`Подключение к ${data.camera_ip}...`);
+            }
+            lastStatus = data.status;
+          }
+
+          // Управляем потоком (не спамим если уже пытаемся)
+          if (
+            data.status === "streaming" &&
+            !streamConnected &&
+            !streamStarting &&
+            !reconnectTimer
+          ) {
+            startStream();
+          }
+
+          // Оверлей
+          updateOverlay(data);
+        } catch (e) {
+          statusDot.className = "status-dot error";
+          statusText.textContent = "· Сервер недоступен";
+          footerStatus.textContent =
+            "Бэкенд недоступен — автопереподключение...";
+          updateOverlay({ status: "backend_down" });
+          addLog("Бэкенд недоступен, повторная попытка...", "error");
+        }
+      }
+
+      function updateOverlay(data) {
+        if (data.status === "streaming" && streamConnected) {
+          overlay.classList.add("hidden");
+          return;
+        }
+        overlay.classList.remove("hidden");
+
+        const messages = {
+          init: ["⏳", "Инициализация", "Запуск бэкенда..."],
+          scanning: ["📡", "Поиск камеры", "Сканирование локальной сети..."],
+          connecting: [
+            "🔌",
+            "Подключение",
+            `Установка RTSP-соединения с ${data.camera_ip || ""}...`,
+          ],
+          streaming: ["📺", "Загрузка потока", "Ожидание первого кадра..."],
+          error: [
+            "⚠️",
+            "Ошибка",
+            `${data.error || "Нет соединения"}. Автопереподключение...`,
+          ],
+          backend_down: [
+            "🔴",
+            "Сервер недоступен",
+            "Бэкенд не отвечает. Переподключение каждые 2 сек...",
+          ],
+        };
+
+        const [icon, title, text] = messages[data.status] || [
+          "❓",
+          data.status,
+          "",
+        ];
+        overlaySpinner.style.display =
+          data.status === "error" || data.status === "backend_down"
+            ? "none"
+            : "block";
+        overlayTitle.textContent = `${icon} ${title}`;
+        overlayText.textContent = text;
+      }
+
+      // ─── MJPEG поток ─────────────────────────────────────────────────────────────
+      let streamStarting = false;
+
+      function startStream() {
+        if (streamStarting) return; // не спамить
+        streamStarting = true;
+
+        const url = `/stream?t=${Date.now()}`;
+        addLog("Подключение к MJPEG-потоку...");
+
+        // Сбрасываем старые обработчики
+        streamImg.onload = null;
+        streamImg.onerror = null;
+
+        // Даём время на подключение — если за 15 сек кадр не пришёл, переподключаем
+        const loadTimeout = setTimeout(() => {
+          if (!streamConnected) {
+            addLog("MJPEG: таймаут загрузки, переподключение...", "warn");
+            streamStarting = false;
+            streamConnected = false;
+            scheduleReconnect();
+          }
+        }, 15000);
+
+        streamImg.onload = function () {
+          clearTimeout(loadTimeout);
+          if (!streamConnected) {
+            streamConnected = true;
+            streamStarting = false;
+            addLog("MJPEG-поток загружен", "ok");
+            overlay.classList.add("hidden");
+          }
+        };
+
+        streamImg.onerror = function () {
+          clearTimeout(loadTimeout);
+          // Не спамим лог если уже были отключены
+          if (streamConnected) {
+            addLog("MJPEG-поток прервался", "warn");
+          }
+          streamConnected = false;
+          streamStarting = false;
+          overlay.classList.remove("hidden");
+          scheduleReconnect();
+        };
+
+        streamImg.src = url;
+      }
+
+      function scheduleReconnect() {
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          streamConnected = false;
+          startStream();
+        }, STREAM_RECONNECT_MS);
+      }
+
+      // ─── Кнопки ──────────────────────────────────────────────────────────────────
+      function takeSnapshot() {
+        const a = document.createElement("a");
+        a.href = "/snapshot";
+        a.download = `snapshot_${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
+        a.click();
+        addLog("Снимок сохранён");
+      }
+
+      function toggleFullscreen() {
+        const wrap = document.getElementById("streamWrap");
+        if (!document.fullscreenElement) {
+          wrap.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen();
+        }
+      }
+
+      function toggleLog() {
+        logPanel.classList.toggle("open");
+      }
+      // ─── Режим отображения ────────────────────────────────────────────────────
+      function setViewMode(mode) {
+        const wrap = document.getElementById("streamWrap");
+        wrap.className =
+          wrap.className.replace(/view-\w+/g, "").trim() + " view-" + mode;
+        // Оригинал нужен overflow: auto для прокрутки
+        wrap.style.overflow = mode === "original" ? "auto" : "hidden";
+        localStorage.setItem("viewMode", mode);
+        addLog(
+          "Режим: " +
+            {
+              fit: "Вписать (растянуть)",
+              contain: "Пропорционально",
+              fill: "Заполнить (обрезка)",
+              original: "Оригинал 1:1",
+              cam1: "Камера 1 (верхняя)",
+              cam2: "Камера 2 (нижняя)",
+            }[mode],
+        );
+      }
+
+      // Восстановить сохранённый режим
+      (function () {
+        const saved = localStorage.getItem("viewMode");
+        if (saved) {
+          document.getElementById("viewMode").value = saved;
+          setViewMode(saved);
+        }
+      })();
+      // ─── Тревоги ────────────────────────────────────────────────────────────────
+      const alarmPanel = document.getElementById("alarmPanel");
+      const alarmList = document.getElementById("alarmList");
+      const alarmCount = document.getElementById("alarmCount");
+      const alarmLastCheck = document.getElementById("alarmLastCheck");
+      const alarmModal = document.getElementById("alarmModal");
+      const alarmModalImg = document.getElementById("alarmModalImg");
+      const alarmModalInfo = document.getElementById("alarmModalInfo");
+      let lastAlarmCount = 0;
+
+      function toggleAlarms() {
+        alarmPanel.classList.toggle("open");
+        if (alarmPanel.classList.contains("open")) {
+          loadAlarms();
+        }
+      }
+
+      async function loadAlarms() {
+        try {
+          const resp = await fetch("/alarms?limit=50", {
+            signal: AbortSignal.timeout(5000),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+
+          alarmCount.textContent = data.total;
+          alarmLastCheck.textContent = data.last_check
+            ? `Проверка: ${new Date(data.last_check).toLocaleTimeString("ru-RU")}`
+            : "—";
+
+          if (data.alarms.length === 0) {
+            alarmList.innerHTML =
+              '<li class="alarm-empty">Тревог не обнаружено</li>';
+            return;
+          }
+
+          // Если появились новые тревоги — уведомляем в лог
+          if (data.total > lastAlarmCount && lastAlarmCount > 0) {
+            addLog(`Новых тревог: ${data.total - lastAlarmCount}`, "warn");
+          }
+          lastAlarmCount = data.total;
+
+          alarmList.innerHTML = data.alarms
+            .map((a) => {
+              const thumbUrl = `/alarm_photo?file=${encodeURIComponent(a.file)}&start=${encodeURIComponent(a.time)}&end=${encodeURIComponent(a.end_time || a.time)}`;
+              const hasPhoto = a.photo_file ? "📷" : "";
+              return `<li class="alarm-item" onclick="showAlarmPhoto('${thumbUrl.replace(/'/g, "\\'")}', '${a.type} — ${a.time}')">
+              <img class="alarm-thumb" src="${thumbUrl}" loading="lazy" onerror="this.style.display='none'" />
+              <div class="alarm-info">
+                <div class="alarm-type">🚨 ${a.type} ${hasPhoto}</div>
+                <div class="alarm-time">🕐 ${a.time}${a.end_time && a.end_time !== a.time ? " → " + a.end_time : ""}</div>
+              </div>
+            </li>`;
+            })
+            .join("");
+        } catch (e) {
+          alarmList.innerHTML =
+            '<li class="alarm-empty">Ошибка загрузки тревог</li>';
+        }
+      }
+
+      function showAlarmPhoto(url, info) {
+        event && event.stopPropagation();
+        alarmModalImg.src = url;
+        alarmModalInfo.textContent = info;
+        alarmModal.classList.add("show");
+      }
+
+      function closeAlarmModal() {
+        alarmModal.classList.remove("show");
+        // НЕ сбрасываем src="" — это генерирует запрос на "/"
+        // и может сломать MJPEG поток
+        alarmModalImg.removeAttribute("src");
+        // Безопасно восстанавливаем поток если он пропал
+        if (!streamConnected && !streamStarting) {
+          startStream();
+        }
+      }
+
+      // Обновляем тревоги каждые 30 сек если панель открыта
+      setInterval(() => {
+        if (alarmPanel.classList.contains("open")) loadAlarms();
+      }, 30000);
+
+      // ─── Запуск ──────────────────────────────────────────────────────────────────
+      addLog("Stream Viewer запущен");
+      pollStatus();
+      setInterval(pollStatus, STATUS_POLL_MS);
+
+      // Переподключение при возврате на вкладку
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+          addLog("Вкладка активна, проверка потока...");
+          pollStatus();
+          if (!streamConnected && !streamStarting && !reconnectTimer)
+            startStream();
+        }
+      });
+    </script>
+  </body>
+</html>
