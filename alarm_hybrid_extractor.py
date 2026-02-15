@@ -132,6 +132,16 @@ def _download_with_retries(
     retries: int,
     debug_dir: str | None,
 ) -> bytes:
+    bt = str(begin_time or "").strip()
+    et = str(end_time or "").strip()
+    if bt and (not et or et == bt):
+        # Some firmwares misbehave when StartTime==EndTime.
+        dt = _parse_dt(bt)
+        if dt is not None:
+            et = (dt + timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            et = bt
+
     last_err: Exception | None = None
     tries = max(1, int(retries))
     for attempt in range(1, tries + 1):
@@ -142,8 +152,8 @@ def _download_with_retries(
                 username=username,
                 password=password,
                 filename=filename,
-                begin_time=begin_time,
-                end_time=end_time,
+                begin_time=bt,
+                end_time=et,
                 debug_dir=debug_dir,
                 timeout_sec=int(timeout_sec),
             )
@@ -241,7 +251,7 @@ def extract_alarm_photo_hybrid(
             # Treat as video stream, sample more frames.
             sample = [0, 1, 2, 3, 5, 8, 10, 12, 14, 16, 18, 20, 24, 28, 32]
             res = extract_best_jpeg_from_motion_h264(
-                raw, debug_dir=dbg, sample_frame_indexes=sample
+                raw, debug_dir=dbg, sample_frame_indexes=sample, score_mode="content"
             )
             if res.ok and res.jpeg_bytes:
                 bw = _bottom_white_ratio(res.jpeg_bytes)
@@ -330,7 +340,10 @@ def extract_alarm_photo_hybrid(
 
                 sample = [0, 10, 30, 60, 90, 120, 150, 180]
                 res = extract_best_jpeg_from_motion_h264(
-                    raw, debug_dir=dbg, sample_frame_indexes=sample
+                    raw,
+                    debug_dir=dbg,
+                    sample_frame_indexes=sample,
+                    score_mode="sharpness",
                 )
                 if res.ok and res.jpeg_bytes:
                     bw = _bottom_white_ratio(res.jpeg_bytes)

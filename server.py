@@ -538,6 +538,7 @@ alarm_store = {
     "polling_active": False,
     "polling_last_run": None,
     "polling_last_error": None,
+    "telegram_last_error": None,
 }
 
 # Ограничиваем параллелизм извлечения тревожных фото,
@@ -547,45 +548,28 @@ alarm_executor = ThreadPoolExecutor(max_workers=max(1, ALARM_EXTRACT_WORKERS))
 os.makedirs(ALARM_PHOTOS_DIR, exist_ok=True)
 
 
-def send_telegram(text: str, photo_bytes: bytes | None = None):
-    """Отправляет сообщение (и фото) в Telegram. Не падает при ошибках."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        if photo_bytes:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            boundary = "----FormBoundary"
-            body = (
-                (
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="chat_id"\r\n\r\n{TELEGRAM_CHAT_ID}\r\n'
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="caption"\r\n'
-                    f"Content-Type: text/plain; charset=utf-8\r\n\r\n{text}\r\n"
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="photo"; filename="alarm.jpg"\r\n'
-                    f"Content-Type: image/jpeg\r\n\r\n"
-                ).encode()
-                + photo_bytes
-                + f"\r\n--{boundary}--\r\n".encode()
-            )
-            req = urllib.request.Request(
-                url,
-                data=body,
-                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            )
-        else:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = json.dumps(
-                {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-            ).encode()
-            req = urllib.request.Request(
-                url, data=data, headers={"Content-Type": "application/json"}
-            )
-        urllib.request.urlopen(req, timeout=10)
-        log.info(f"Telegram: отправлено")
-    except Exception as e:
-        log.warning(f"Telegram ошибка: {e}")
+def send_telegram(text: str, photo_bytes: bytes | None = None) -> bool:
+    """Отправляет сообщение (и фото) в Telegram.
+
+    Returns True on success, False otherwise. Does not raise.
+    """
+    ok, err = tg_send(
+        bot_token=TELEGRAM_BOT_TOKEN,
+        chat_id=TELEGRAM_CHAT_ID,
+        text=text,
+        photo_bytes=photo_bytes,
+        timeout_sec=10,
+    )
+
+    if ok:
+        log.info("Telegram: отправлено")
+        return True
+
+    if err and err != "missing_token_or_chat_id":
+        log.warning(f"Telegram ошибка: {err}")
+        alarm_store["telegram_last_error"] = err
+
+    return False
 
 
 def query_alarms(cam, begin: str, end: str, file_type: str = "jpg") -> list:
@@ -1153,43 +1137,55 @@ def alarm_history_poll_loop():
 
                 def job_poll(entry=alarm_entry):
                     dt_txt = str(entry.get("time", ""))
-                    bt = _parse_dt(dt_txt)
-                    if bt is None:
-                        return
+                    try:
+                        bt = _parse_dt(dt_txt)
+                        if bt is None:
+                            log.warning(f"Alarm poll job: invalid BeginTime: {dt_txt}")
+                            return
 
-                    jpeg, meta = extract_alarm_photo_hybrid(
-                        state.camera_ip or KNOWN_IP,
-                        bt,
-                        dvrip_port=DVRIP_PORT,
-                        username=CAMERA_USER,
-                        password=CAMERA_PASS,
-                        debug_dir_root=ALARM_PHOTOS_DIR,
-                        debug=ALARM_DEBUG_DUMP,
-                        timeout_sec=60,
-                        download_retries=2,
-                        bottom_white_threshold=0.25,
-                    )
+                        log.info(
+                            f"Alarm poll job: start {dt_txt} file={entry.get('file', '')}"
+                        )
 
-                    photo_file = None
-                    if jpeg:
-                        alarm_id = dt_txt.replace(":", "_").replace(" ", "_")
-                        photo_file = save_alarm_photo(alarm_id, jpeg)
+                        jpeg, meta = extract_alarm_photo_hybrid(
+                            state.camera_ip or KNOWN_IP,
+                            bt,
+                            dvrip_port=DVRIP_PORT,
+                            username=CAMERA_USER,
+                            password=CAMERA_PASS,
+                            debug_dir_root=ALARM_PHOTOS_DIR,
+                            debug=ALARM_DEBUG_DUMP,
+                            timeout_sec=15,
+                            download_retries=3,
+                            bottom_white_threshold=0.25,
+                        )
 
-                    with alarm_store["lock"]:
-                        for a in alarm_store["alarms"]:
-                            if a.get("file") == entry.get("file"):
-                                a["photo_file"] = photo_file
-                                a["size"] = len(jpeg) if jpeg else 0
-                                a["photo_meta"] = meta
-                                break
+                        photo_file = None
+                        if jpeg:
+                            alarm_id = dt_txt.replace(":", "_").replace(" ", "_")
+                            photo_file = save_alarm_photo(alarm_id, jpeg)
 
-                    text = f"🚨 {entry.get('type', 'Событие')}\n🕐 {dt_txt}\n📼 {entry.get('file', '')}"
-                    if not jpeg:
-                        text += "\n⚠️ Фото не удалось достать"
+                        with alarm_store["lock"]:
+                            for a in alarm_store["alarms"]:
+                                if a.get("file") == entry.get("file"):
+                                    a["photo_file"] = photo_file
+                                    a["size"] = len(jpeg) if jpeg else 0
+                                    a["photo_meta"] = meta
+                                    break
 
-                    ok = send_telegram(text, jpeg if jpeg else None)
-                    if not ok:
-                        log.warning("Telegram send failed for alarm")
+                        text = f"🚨 {entry.get('type', 'Событие')}\n🕐 {dt_txt}\n📼 {entry.get('file', '')}"
+                        if not jpeg:
+                            text += "\n⚠️ Фото не удалось достать"
+
+                        ok = send_telegram(text, jpeg if jpeg else None)
+                        log.info(
+                            f"Alarm poll job: done ok={ok} photo={'yes' if jpeg else 'no'} chosen={getattr(meta, 'get', lambda _k=None: None)('chosen') if isinstance(meta, dict) else None}"
+                        )
+                        if not ok:
+                            log.warning("Telegram send failed for alarm")
+                    except Exception as e:
+                        alarm_store["polling_last_error"] = str(e)
+                        log.warning(f"Alarm poll job failed: {e}")
 
                 alarm_executor.submit(job_poll)
 
@@ -1364,6 +1360,7 @@ def api_alarms():
                 "polling_active": bool(alarm_store.get("polling_active")),
                 "polling_last_run": alarm_store.get("polling_last_run"),
                 "polling_last_error": alarm_store.get("polling_last_error"),
+                "telegram_last_error": alarm_store.get("telegram_last_error"),
                 "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
             }
         )
@@ -1377,6 +1374,66 @@ def api_telegram_test():
     """
     ok = send_telegram(
         f"✅ stream_viewer test {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+
+@app.route("/notify_latest_alarm")
+def api_notify_latest_alarm():
+    """Debug endpoint: force-send TG for the latest alarm marker.
+
+    Use to verify full pipeline: DVRIP index -> hybrid extraction -> Telegram.
+    """
+    if not state.camera_ip:
+        return jsonify({"ok": False, "reason": "no_camera_ip"}), 503
+
+    now = datetime.now()
+    rows, meta_q = fetch_recent_alarm_markers(
+        ip=state.camera_ip,
+        port=DVRIP_PORT,
+        user=CAMERA_USER,
+        password=CAMERA_PASS,
+        end_dt=now,
+        want=1,
+        max_lookback_hours=12,
+    )
+    if not rows:
+        return jsonify({"ok": False, "reason": "no_markers", "query": meta_q}), 404
+
+    r = rows[0]
+    bt_txt = str(r.get("BeginTime", ""))
+    fname = str(r.get("FileName", ""))
+    bt = _parse_dt(bt_txt)
+    if bt is None:
+        return jsonify({"ok": False, "reason": "bad_time", "BeginTime": bt_txt}), 400
+
+    jpeg, meta = extract_alarm_photo_hybrid(
+        state.camera_ip or KNOWN_IP,
+        bt,
+        dvrip_port=DVRIP_PORT,
+        username=CAMERA_USER,
+        password=CAMERA_PASS,
+        debug_dir_root=ALARM_PHOTOS_DIR,
+        debug=ALARM_DEBUG_DUMP,
+        timeout_sec=60,
+        download_retries=2,
+        bottom_white_threshold=0.25,
+    )
+
+    text = f"🚨 Debug notify\n🕐 {bt_txt}\n📼 {fname}"
+    if not jpeg:
+        text += "\n⚠️ Фото не удалось достать"
+
+    tg_ok = send_telegram(text, jpeg if jpeg else None)
+    return jsonify(
+        {
+            "ok": True,
+            "tg_ok": bool(tg_ok),
+            "BeginTime": bt_txt,
+            "FileName": fname,
+            "jpeg": bool(jpeg),
+            "meta": meta,
+            "query": meta_q,
+        }
     )
     return jsonify(
         {

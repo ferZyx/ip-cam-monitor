@@ -61,8 +61,17 @@ def send_telegram(
             )
 
         with urllib.request.urlopen(req, timeout=int(timeout_sec)) as resp:
-            # even if we don't parse JSON, make sure request completes
-            _ = resp.read(256)
+            body = resp.read()
+
+        try:
+            payload = json.loads(body.decode("utf-8", errors="replace"))
+            if isinstance(payload, dict) and payload.get("ok") is False:
+                desc = payload.get("description")
+                return False, str(desc) if desc else "telegram_api_ok_false"
+        except Exception:
+            # Not fatal; treat as success if HTTP request succeeded.
+            pass
+
         return True, None
     except Exception as e:
         return False, str(e)

@@ -136,6 +136,18 @@ def _sharpness_score_bgr(frame) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def _contrast_score_bgr(frame) -> float:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return float(gray.std())
+
+
+def _gray_ratio_bgr(frame) -> float:
+    # low saturation pixels ratio
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1]
+    return float((s < 18).mean())
+
+
 @dataclass
 class ExtractResult:
     ok: bool
@@ -245,6 +257,7 @@ def extract_best_jpeg_from_motion_h264(
     stream_1426: bytes,
     debug_dir: str | None = None,
     sample_frame_indexes: list[int] | None = None,
+    score_mode: str = "sharpness",
 ) -> ExtractResult:
     """Преобразует 1426 stream -> media .h264 -> выбирает лучший кадр -> JPEG bytes."""
     if not stream_1426:
@@ -290,7 +303,13 @@ def extract_best_jpeg_from_motion_h264(
             if not ok or frame is None:
                 break
             if idx in target_set:
-                score = _sharpness_score_bgr(frame)
+                if score_mode == "content":
+                    sharp = _sharpness_score_bgr(frame)
+                    cont = _contrast_score_bgr(frame)
+                    gray_r = _gray_ratio_bgr(frame)
+                    score = (sharp + cont * 5.0) * max(0.0, 1.0 - gray_r)
+                else:
+                    score = _sharpness_score_bgr(frame)
                 if debug_dir:
                     out = os.path.join(
                         debug_dir, f"candidate_{idx:03d}_s{score:.1f}.jpg"
