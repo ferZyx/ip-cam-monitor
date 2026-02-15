@@ -1396,15 +1396,15 @@ def main():
     capture_thread = threading.Thread(target=capture_loop, daemon=True, name="capture")
     capture_thread.start()
 
-    alarm_cb_thread = threading.Thread(
-        target=alarm_callback_loop, daemon=True, name="alarm_callback"
-    )
-    alarm_cb_thread.start()
-
-    alarm_hist_thread = threading.Thread(
-        target=alarm_history_poll_loop, daemon=True, name="alarm_history"
-    )
-    alarm_hist_thread.start()
+    # alarm_cb_thread = threading.Thread(
+    #     target=alarm_callback_loop, daemon=True, name="alarm_callback"
+    # )
+    # alarm_cb_thread.start()
+    #
+    # alarm_hist_thread = threading.Thread(
+    #     target=alarm_history_poll_loop, daemon=True, name="alarm_history"
+    # )
+    # alarm_hist_thread.start()
 
     log.info(f"Веб-интерфейс: http://localhost:{WEB_PORT}")
     log.info(f"MJPEG поток:   http://localhost:{WEB_PORT}/stream")
