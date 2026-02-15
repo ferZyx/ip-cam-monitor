@@ -61,6 +61,16 @@ except ModuleNotFoundError:
     )
 
 try:
+    from alarm_index import fetch_recent_alarm_markers
+except ModuleNotFoundError:
+    from stream_viewer.alarm_index import fetch_recent_alarm_markers  # type: ignore
+
+try:
+    from telegram_notify import send_telegram as tg_send
+except ModuleNotFoundError:
+    from stream_viewer.telegram_notify import send_telegram as tg_send  # type: ignore
+
+try:
     import cv2
 except ImportError:
     print("opencv-python не установлен. Выполните: pip install opencv-python")
@@ -116,7 +126,7 @@ MAX_FPS = 7  # Камера даёт ~6.6fps
 # Telegram (оставить пустым чтобы отключить)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-ALARM_POLL_INTERVAL = _env_int("ALARM_POLL_INTERVAL", 300)  # backup
+ALARM_POLL_INTERVAL = _env_int("ALARM_POLL_INTERVAL", 30)  # polling
 ALARM_HISTORY_MAX = 200  # Макс тревог в памяти
 ALARM_PHOTOS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "alarm_photos"
@@ -132,6 +142,9 @@ ALARM_TG_FROM_HISTORY = _env_bool("ALARM_TG_FROM_HISTORY", default=False)
 ALARM_TG_REQUIRE_PHOTO = _env_bool("ALARM_TG_REQUIRE_PHOTO", default=True)
 ALARM_TG_HISTORY_MAX_AGE_SEC = _env_int("ALARM_TG_HISTORY_MAX_AGE_SEC", 120)
 ALARM_EXTRACT_WORKERS = _env_int("ALARM_EXTRACT_WORKERS", 1)
+
+# Realtime callback support is flaky on some firmwares; polling is default.
+ALARM_USE_CALLBACK = _env_bool("ALARM_USE_CALLBACK", default=False)
 
 
 # ─── Логгирование ─────────────────────────────────────────────────────────────
@@ -521,6 +534,10 @@ alarm_store = {
     "known_files": set(),  # уже виденные файлы, чтобы не дублировать
     "last_alarm_time": 0,  # timestamp последней тревоги (для cooldown)
     "callback_active": False,  # alarm callback запущен?
+    "last_callback_event_ts": 0.0,  # время последнего события из callback (time.time)
+    "polling_active": False,
+    "polling_last_run": None,
+    "polling_last_error": None,
 }
 
 # Ограничиваем параллелизм извлечения тревожных фото,
@@ -833,6 +850,9 @@ def on_alarm_callback(alarm_data, seq_number):
     """
     now = time.time()
 
+    # Mark that realtime callback is actually producing events.
+    alarm_store["last_callback_event_ts"] = now
+
     # Cooldown: не реагируем чаще чем раз в ALARM_COOLDOWN секунд
     if now - alarm_store["last_alarm_time"] < ALARM_COOLDOWN:
         return
@@ -1032,136 +1052,153 @@ def alarm_callback_loop():
 
 
 def alarm_history_poll_loop():
-    """
-    Backup: периодически опрашивает OPFileQuery для сбора истории тревог.
-    Не делает фото (фото делает callback), только пополняет список.
-    """
     if (not HAS_DVRIP) or (DVRIPCam is None):
+        log.warning("DVRIP недоступен — polling тревог отключён")
         return
 
-    # Даём время callback-у запуститься
-    time.sleep(30)
-    log.info(f"Backup: история тревог каждые {ALARM_POLL_INTERVAL}с")
+    # Do not rely on callback.
+    time.sleep(3)
+    log.info(f"Alarm polling: каждые {ALARM_POLL_INTERVAL}с")
+
+    seeded = False
 
     while True:
         if not state.camera_ip:
-            time.sleep(10)
+            time.sleep(5)
             continue
 
-        cam = None
         try:
-            cam = DVRIPCam(
-                state.camera_ip, port=DVRIP_PORT, user=CAMERA_USER, password=CAMERA_PASS
+            now = datetime.now()
+            alarm_store["polling_active"] = True
+            alarm_store["polling_last_run"] = now.isoformat()
+            alarm_store["polling_last_error"] = None
+
+            rows, meta_q = fetch_recent_alarm_markers(
+                ip=state.camera_ip,
+                port=DVRIP_PORT,
+                user=CAMERA_USER,
+                password=CAMERA_PASS,
+                end_dt=now,
+                want=40,
+                max_lookback_hours=12,
             )
-            if not cam.login():
+
+            if not seeded:
+                # Seed known set, and store list for UI. Do NOT notify.
+                with alarm_store["lock"]:
+                    for r in rows:
+                        fname = str(r.get("FileName", ""))
+                        if not fname:
+                            continue
+                        alarm_store["known_files"].add(fname)
+                        alarm_store["alarms"] = (
+                            [
+                                {
+                                    "time": r.get("BeginTime", ""),
+                                    "end_time": r.get("EndTime", ""),
+                                    "type": "Движение",
+                                    "type_code": "M",
+                                    "file": fname,
+                                    "size": 0,
+                                    "photo_file": None,
+                                    "source": "poll_seed",
+                                }
+                            ]
+                            + alarm_store["alarms"]
+                        )[:ALARM_HISTORY_MAX]
+                    alarm_store["last_check"] = now.isoformat()
+                seeded = True
+                log.info(f"Alarm polling: seed {len(rows)} markers")
                 time.sleep(ALARM_POLL_INTERVAL)
                 continue
 
-            now = datetime.now()
-            begin = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-            end = now.strftime("%Y-%m-%d %H:%M:%S")
+            new_markers: list[dict] = []
+            with alarm_store["lock"]:
+                for r in rows:
+                    fname = str(r.get("FileName", ""))
+                    if not fname:
+                        continue
+                    if fname in alarm_store["known_files"]:
+                        continue
+                    alarm_store["known_files"].add(fname)
+                    new_markers.append(r)
 
-            # История тревог: именно motion-ролики (Event=M, Type=h264)
-            files = query_alarms(cam, begin, end, "h264")
+            if new_markers:
+                # oldest -> newest
+                new_markers.sort(
+                    key=lambda x: _parse_dt(str(x.get("BeginTime", ""))) or datetime.min
+                )
+                log.info(f"Alarm polling: +{len(new_markers)} new markers")
 
-            # Собираем новые элементы, которых еще не видели
-            new_items = []
-            for f in files:
-                fname = f.get("FileName", "")
-                if not fname:
-                    continue
-                if fname in alarm_store["known_files"]:
-                    continue
-                new_items.append(f)
+            for r in new_markers:
+                fname = str(r.get("FileName", ""))
+                bt_txt = str(r.get("BeginTime", ""))
+                et_txt = str(r.get("EndTime", ""))
 
-            new_count = 0
-            for f in new_items:
-                fname = f.get("FileName", "")
-
-                event_code = "M"
                 alarm_entry = {
-                    "time": f.get("BeginTime", ""),
-                    "end_time": f.get("EndTime", ""),
-                    "type": parse_alarm_event(event_code),
-                    "type_code": event_code,
+                    "time": bt_txt,
+                    "end_time": et_txt,
+                    "type": "Движение",
+                    "type_code": "M",
                     "file": fname,
                     "size": 0,
                     "photo_file": None,
-                    "source": "history",
+                    "source": "poll",
                 }
 
-                alarm_store["known_files"].add(fname)
                 with alarm_store["lock"]:
                     alarm_store["alarms"] = ([alarm_entry] + alarm_store["alarms"])[
                         :ALARM_HISTORY_MAX
                     ]
-                new_count += 1
 
-                # Если callback пропустил — опционально отправим TG из history
-                if ALARM_TG_FROM_HISTORY and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                    bt = _parse_dt(str(f.get("BeginTime", "")))
-                    if bt is not None:
-                        age_sec = (datetime.now() - bt).total_seconds()
-                        if age_sec > ALARM_TG_HISTORY_MAX_AGE_SEC:
-                            continue
+                def job_poll(entry=alarm_entry):
+                    dt_txt = str(entry.get("time", ""))
+                    bt = _parse_dt(dt_txt)
+                    if bt is None:
+                        return
 
-                    def job_hist(entry=f, type_name=alarm_entry["type"]):
-                        dt_txt = str(entry.get("BeginTime", ""))
-                        bt = _parse_dt(dt_txt) if dt_txt else None
-                        if bt is not None:
-                            jpeg, meta = extract_alarm_photo_hybrid(
-                                state.camera_ip or KNOWN_IP,
-                                bt,
-                                dvrip_port=DVRIP_PORT,
-                                username=CAMERA_USER,
-                                password=CAMERA_PASS,
-                                debug_dir_root=ALARM_PHOTOS_DIR,
-                                debug=ALARM_DEBUG_DUMP,
-                                timeout_sec=60,
-                                download_retries=2,
-                                bottom_white_threshold=0.25,
-                            )
-                        else:
-                            jpeg, meta = extract_alarm_photo_from_motion_file(
-                                state.camera_ip or KNOWN_IP,
-                                entry,
-                                debug=ALARM_DEBUG_DUMP,
-                            )
-                        if ALARM_TG_REQUIRE_PHOTO and not jpeg:
-                            return
+                    jpeg, meta = extract_alarm_photo_hybrid(
+                        state.camera_ip or KNOWN_IP,
+                        bt,
+                        dvrip_port=DVRIP_PORT,
+                        username=CAMERA_USER,
+                        password=CAMERA_PASS,
+                        debug_dir_root=ALARM_PHOTOS_DIR,
+                        debug=ALARM_DEBUG_DUMP,
+                        timeout_sec=60,
+                        download_retries=2,
+                        bottom_white_threshold=0.25,
+                    )
 
-                        photo_file = None
-                        if jpeg:
-                            alarm_id = dt_txt.replace(":", "_").replace(" ", "_")
-                            photo_file = save_alarm_photo(alarm_id, jpeg)
+                    photo_file = None
+                    if jpeg:
+                        alarm_id = dt_txt.replace(":", "_").replace(" ", "_")
+                        photo_file = save_alarm_photo(alarm_id, jpeg)
 
-                        with alarm_store["lock"]:
-                            for a in alarm_store["alarms"]:
-                                if a.get("file") == entry.get("FileName"):
-                                    a["photo_file"] = photo_file
-                                    a["size"] = len(jpeg) if jpeg else 0
-                                    a["photo_meta"] = meta
-                                    break
+                    with alarm_store["lock"]:
+                        for a in alarm_store["alarms"]:
+                            if a.get("file") == entry.get("file"):
+                                a["photo_file"] = photo_file
+                                a["size"] = len(jpeg) if jpeg else 0
+                                a["photo_meta"] = meta
+                                break
 
-                        text = f"🚨 {type_name}\n🕐 {dt_txt}\n📼 {entry.get('FileName', '')}"
-                        send_telegram(text, jpeg)
+                    text = f"🚨 {entry.get('type', 'Событие')}\n🕐 {dt_txt}\n📼 {entry.get('file', '')}"
+                    if not jpeg:
+                        text += "\n⚠️ Фото не удалось достать"
 
-                    alarm_executor.submit(job_hist)
+                    ok = send_telegram(text, jpeg if jpeg else None)
+                    if not ok:
+                        log.warning("Telegram send failed for alarm")
 
-            if new_count > 0:
-                log.info(f"История: +{new_count} тревог из OPFileQuery (TG)")
+                alarm_executor.submit(job_poll)
 
             with alarm_store["lock"]:
                 alarm_store["last_check"] = now.isoformat()
 
         except Exception as e:
-            log.warning(f"History poll ошибка: {e}")
-        finally:
-            if cam:
-                try:
-                    cam.close()
-                except Exception:
-                    pass
+            alarm_store["polling_last_error"] = str(e)
+            log.warning(f"Alarm polling ошибка: {e}")
 
         time.sleep(ALARM_POLL_INTERVAL)
 
@@ -1313,13 +1350,40 @@ def api_alarms():
     """JSON со списком тревог."""
     limit = request.args.get("limit", 50, type=int)
     with alarm_store["lock"]:
+        last_cb = float(alarm_store.get("last_callback_event_ts") or 0.0)
+        cb_age = None
+        if last_cb > 0:
+            cb_age = round(time.time() - last_cb, 1)
         return jsonify(
             {
                 "alarms": alarm_store["alarms"][:limit],
                 "total": len(alarm_store["alarms"]),
                 "last_check": alarm_store["last_check"],
+                "callback_active": bool(alarm_store.get("callback_active")),
+                "callback_last_event_age_sec": cb_age,
+                "polling_active": bool(alarm_store.get("polling_active")),
+                "polling_last_run": alarm_store.get("polling_last_run"),
+                "polling_last_error": alarm_store.get("polling_last_error"),
+                "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
             }
         )
+
+
+@app.route("/telegram_test")
+def api_telegram_test():
+    """Sends a test telegram message. Returns JSON with result.
+
+    Does not expose bot token.
+    """
+    ok = send_telegram(
+        f"✅ stream_viewer test {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    return jsonify(
+        {
+            "ok": bool(ok),
+            "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        }
+    )
 
 
 @app.route("/alarm_photo")
@@ -1393,18 +1457,30 @@ def main():
     log.info("  Stream Viewer — запуск")
     log.info("=" * 50)
 
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        log.info("Telegram: включен")
+    else:
+        log.info("Telegram: выключен (нет TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)")
+
+    log.info(
+        f"Alarm notify: from_history={ALARM_TG_FROM_HISTORY} require_photo={ALARM_TG_REQUIRE_PHOTO} cooldown={ALARM_COOLDOWN}s"
+    )
+
     capture_thread = threading.Thread(target=capture_loop, daemon=True, name="capture")
     capture_thread.start()
 
-    alarm_cb_thread = threading.Thread(
-        target=alarm_callback_loop, daemon=True, name="alarm_callback"
-    )
-    alarm_cb_thread.start()
+    if ALARM_USE_CALLBACK:
+        alarm_cb_thread = threading.Thread(
+            target=alarm_callback_loop, daemon=True, name="alarm_callback"
+        )
+        alarm_cb_thread.start()
+    else:
+        log.info("Alarm callback: отключен (ALARM_USE_CALLBACK=0)")
 
-    alarm_hist_thread = threading.Thread(
-        target=alarm_history_poll_loop, daemon=True, name="alarm_history"
+    alarm_poll_thread = threading.Thread(
+        target=alarm_history_poll_loop, daemon=True, name="alarm_poll"
     )
-    alarm_hist_thread.start()
+    alarm_poll_thread.start()
 
     log.info(f"Веб-интерфейс: http://localhost:{WEB_PORT}")
     log.info(f"MJPEG поток:   http://localhost:{WEB_PORT}/stream")
