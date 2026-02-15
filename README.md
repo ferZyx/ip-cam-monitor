@@ -44,3 +44,10 @@ Telegram (опционально):
 
 - Файл `stream_viewer/.env` игнорируется git.
 - Папка `stream_viewer/alarm_photos/` игнорируется git.
+
+## Experiments / Research
+
+Все ресерч/экспериментальные скрипты храним в `stream_viewer/experiments/`.
+
+- Выходные файлы складываем в `stream_viewer/experiments/output/` (игнорируется git).
+- Скрипты в `stream_viewer/experiments/` должны читать настройки из `stream_viewer/.env`.

@@ -53,6 +53,14 @@ except ModuleNotFoundError:
     )
 
 try:
+    # When running as `py server.py` inside `stream_viewer/`
+    from alarm_hybrid_extractor import extract_alarm_photo_hybrid
+except ModuleNotFoundError:
+    from stream_viewer.alarm_hybrid_extractor import (  # type: ignore
+        extract_alarm_photo_hybrid,
+    )
+
+try:
     import cv2
 except ImportError:
     print("opencv-python не установлен. Выполните: pip install opencv-python")
@@ -875,10 +883,17 @@ def on_alarm_callback(alarm_data, seq_number):
         photo = None
         photo_meta = {}
         try:
-            photo, photo_meta = extract_alarm_photo_from_motion(
+            photo, photo_meta = extract_alarm_photo_hybrid(
                 state.camera_ip or KNOWN_IP,
                 dt_now,
+                dvrip_port=DVRIP_PORT,
+                username=CAMERA_USER,
+                password=CAMERA_PASS,
+                debug_dir_root=ALARM_PHOTOS_DIR,
                 debug=ALARM_DEBUG_DUMP,
+                timeout_sec=60,
+                download_retries=2,
+                bottom_white_threshold=0.25,
             )
             if not photo:
                 # Fallback: если архивное фото не получилось, берём текущий кадр (лучше, чем ничего)
@@ -887,6 +902,22 @@ def on_alarm_callback(alarm_data, seq_number):
                 )
         except Exception as e:
             log.warning(f"alarm photo extraction failed: {e}")
+
+        file_ref = None
+        try:
+            chosen = None
+            if isinstance(photo_meta, dict):
+                chosen = photo_meta.get("chosen")
+                if chosen == "idea1":
+                    file_ref = (
+                        photo_meta.get("idea1", {}).get("picked", {}).get("FileName")
+                    )
+                if chosen == "motion":
+                    file_ref = (
+                        photo_meta.get("motion", {}).get("picked", {}).get("FileName")
+                    )
+        except Exception:
+            file_ref = None
 
         photo_file = None
         if photo:
@@ -901,7 +932,7 @@ def on_alarm_callback(alarm_data, seq_number):
             "end_time": time_str,
             "type": event_type,
             "type_code": event_code,
-            "file": photo_meta.get("file") or f"callback_seq{seq_number}",
+            "file": file_ref or f"callback_seq{seq_number}",
             "size": len(photo) if photo else 0,
             "photo_file": photo_file,
             "source": "realtime",
@@ -1076,11 +1107,26 @@ def alarm_history_poll_loop():
 
                     def job_hist(entry=f, type_name=alarm_entry["type"]):
                         dt_txt = str(entry.get("BeginTime", ""))
-                        jpeg, meta = extract_alarm_photo_from_motion_file(
-                            state.camera_ip or KNOWN_IP,
-                            entry,
-                            debug=ALARM_DEBUG_DUMP,
-                        )
+                        bt = _parse_dt(dt_txt) if dt_txt else None
+                        if bt is not None:
+                            jpeg, meta = extract_alarm_photo_hybrid(
+                                state.camera_ip or KNOWN_IP,
+                                bt,
+                                dvrip_port=DVRIP_PORT,
+                                username=CAMERA_USER,
+                                password=CAMERA_PASS,
+                                debug_dir_root=ALARM_PHOTOS_DIR,
+                                debug=ALARM_DEBUG_DUMP,
+                                timeout_sec=60,
+                                download_retries=2,
+                                bottom_white_threshold=0.25,
+                            )
+                        else:
+                            jpeg, meta = extract_alarm_photo_from_motion_file(
+                                state.camera_ip or KNOWN_IP,
+                                entry,
+                                debug=ALARM_DEBUG_DUMP,
+                            )
                         if ALARM_TG_REQUIRE_PHOTO and not jpeg:
                             return
 

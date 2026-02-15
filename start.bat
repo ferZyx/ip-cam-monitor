@@ -23,9 +23,10 @@ if %errorlevel% neq 0 (
     echo.
 )
 
-:: Открываем фронт в браузере через 30 секунд (один раз)
-:: Параметр fullscreen=true будет обработан фронтом.
-start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 30; Start-Process 'http://localhost:5050/?fullscreen=true'"
+:: Открываем фронт в браузере (один раз)
+:: Важно: обычный fullscreen через JS блокируется без жеста пользователя.
+:: Поэтому пытаемся запустить Edge/Chrome в kiosk/fullscreen режиме.
+start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0open_browser.ps1" -Url "http://localhost:5050/" -TimeoutSeconds 10
 
 :: Бесконечный цикл — самовосстановление при падении
 :loop

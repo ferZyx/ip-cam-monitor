@@ -18,6 +18,7 @@ ENV/
 
 # Local outputs
 alarm_photos/
+experiments/output/
 *.h264
 *.bin
 *.log

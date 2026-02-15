@@ -3,13 +3,15 @@ import os
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 from dvrip import DVRIPCam
 
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+    ROOT = Path(__file__).resolve().parents[1]
+    load_dotenv(ROOT / ".env")
 except Exception:
     pass
 
@@ -25,10 +27,10 @@ def main():
         print("ERROR: set CAMERA_PASS in env")
         return
 
-    out_dir = os.path.join(os.path.dirname(__file__), "research_output")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(
-        out_dir, f"alarm_callback_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    out_dir = Path(__file__).resolve().parent / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = (
+        out_dir / f"alarm_callback_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
     )
 
     lock = threading.Lock()

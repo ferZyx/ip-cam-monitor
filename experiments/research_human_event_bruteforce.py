@@ -1,13 +1,15 @@
 import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from dvrip import DVRIPCam
 
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+    ROOT = Path(__file__).resolve().parents[1]
+    load_dotenv(ROOT / ".env")
 except Exception:
     pass
 
@@ -100,8 +102,11 @@ def main():
                     }
                     report["results"].append(row)
                     if len(files):
+                        sample_name = ""
+                        if isinstance(sample, dict):
+                            sample_name = sample.get("FileName", "")
                         print(
-                            f"event={ev:12} type={tp:4} stream={st:5} -> {len(files)} | {sample.get('FileName', '')}"
+                            f"event={ev:12} type={tp:4} stream={st:5} -> {len(files)} | {sample_name}"
                         )
                 except Exception as e:
                     report["results"].append(
@@ -111,11 +116,9 @@ def main():
 
     cam.close()
 
-    out_dir = os.path.join(os.path.dirname(__file__), "research_output")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(
-        out_dir, f"filequery_bruteforce_{now.strftime('%Y%m%d_%H%M%S')}.json"
-    )
+    out_dir = Path(__file__).resolve().parent / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"filequery_bruteforce_{now.strftime('%Y%m%d_%H%M%S')}.json"
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
     print("Saved:", out_path)
