@@ -1,7 +1,8 @@
 import unittest
+from unittest.mock import MagicMock, patch
 
 
-from stream_push import build_ffmpeg_push_command, should_enable_push
+from stream_push import RemotePushRelay, build_ffmpeg_push_command, should_enable_push
 
 
 class StreamPushTests(unittest.TestCase):
@@ -34,6 +35,34 @@ class StreamPushTests(unittest.TestCase):
         self.assertFalse(should_enable_push(""))
         self.assertFalse(should_enable_push("   "))
         self.assertTrue(should_enable_push("rtmp://example.com/live/cam1"))
+
+    @patch("stream_push.subprocess.Popen")
+    def test_remote_relay_uses_pipe_logging_when_enabled(self, popen_mock):
+        process = MagicMock()
+        process.poll.return_value = None
+        process.stdout = None
+        popen_mock.return_value = process
+
+        relay = RemotePushRelay(log_to_console=True)
+        relay.ensure_running("rtsp://cam/main", "rtmp://example.com/live/cam1")
+
+        _, kwargs = popen_mock.call_args
+        self.assertEqual(kwargs["stdout"], -1)
+        self.assertEqual(kwargs["stderr"], -2)
+        self.assertTrue(kwargs["text"])
+
+    @patch("stream_push.subprocess.Popen")
+    def test_remote_relay_silences_logs_when_disabled(self, popen_mock):
+        process = MagicMock()
+        process.poll.return_value = None
+        popen_mock.return_value = process
+
+        relay = RemotePushRelay(log_to_console=False)
+        relay.ensure_running("rtsp://cam/main", "rtmp://example.com/live/cam1")
+
+        _, kwargs = popen_mock.call_args
+        self.assertEqual(kwargs["stdout"], -3)
+        self.assertEqual(kwargs["stderr"], -3)
 
 
 if __name__ == "__main__":

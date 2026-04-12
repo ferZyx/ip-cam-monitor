@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import threading
 
@@ -39,13 +40,22 @@ def build_ffmpeg_push_command(
 
 
 class RemotePushRelay:
-    def __init__(self, ffmpeg_bin: str = "ffmpeg", transport: str = "tcp"):
+    def __init__(
+        self,
+        ffmpeg_bin: str = "ffmpeg",
+        transport: str = "tcp",
+        log_to_console: bool = False,
+        logger: logging.Logger | None = None,
+    ):
         self.ffmpeg_bin = ffmpeg_bin
         self.transport = transport
+        self.log_to_console = log_to_console
+        self.logger = logger
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._source_url: str | None = None
         self._target_url: str | None = None
+        self._output_thread: threading.Thread | None = None
 
     def ensure_running(self, source_rtsp_url: str, target_url: str) -> None:
         with self._lock:
@@ -70,11 +80,23 @@ class RemotePushRelay:
             )
             self._process = subprocess.Popen(
                 command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=(subprocess.PIPE if self.log_to_console else subprocess.DEVNULL),
+                stderr=(
+                    subprocess.STDOUT if self.log_to_console else subprocess.DEVNULL
+                ),
+                text=self.log_to_console,
+                bufsize=(1 if self.log_to_console else -1),
             )
             self._source_url = source_rtsp_url
             self._target_url = target_url
+            if self.log_to_console:
+                self._output_thread = threading.Thread(
+                    target=self._pipe_ffmpeg_output,
+                    args=(self._process,),
+                    daemon=True,
+                    name="remote_push_logs",
+                )
+                self._output_thread.start()
 
     def stop(self) -> None:
         with self._lock:
@@ -94,12 +116,14 @@ class RemotePushRelay:
         if self._process is None:
             self._source_url = None
             self._target_url = None
+            self._output_thread = None
             return
 
         process = self._process
         self._process = None
         self._source_url = None
         self._target_url = None
+        self._output_thread = None
 
         if process.poll() is None:
             process.terminate()
@@ -108,3 +132,18 @@ class RemotePushRelay:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=3)
+
+    def _pipe_ffmpeg_output(self, process: subprocess.Popen) -> None:
+        if process.stdout is None:
+            return
+        try:
+            for raw_line in process.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if self.logger is not None:
+                    self.logger.info(f"[remote_push] {line}")
+                else:
+                    print(f"[remote_push] {line}")
+        except Exception:
+            return

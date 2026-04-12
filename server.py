@@ -142,6 +142,7 @@ REMOTE_PUSH_TRANSPORT = (
     os.getenv("REMOTE_PUSH_TRANSPORT", "tcp").strip() or "tcp"
 ).lower()
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg").strip() or "ffmpeg"
+REMOTE_PUSH_LOG_TO_CONSOLE = _env_bool("REMOTE_PUSH_LOG_TO_CONSOLE", default=True)
 
 # Alarm -> Telegram behavior
 ALARM_TG_FROM_HISTORY = _env_bool("ALARM_TG_FROM_HISTORY", default=False)
@@ -237,7 +238,12 @@ class CameraState:
 
 
 state = CameraState()
-remote_relay = RemotePushRelay(ffmpeg_bin=FFMPEG_BIN, transport=REMOTE_PUSH_TRANSPORT)
+remote_relay = RemotePushRelay(
+    ffmpeg_bin=FFMPEG_BIN,
+    transport=REMOTE_PUSH_TRANSPORT,
+    log_to_console=REMOTE_PUSH_LOG_TO_CONSOLE,
+    logger=log,
+)
 
 
 # ─── Обнаружение камеры ───────────────────────────────────────────────────────
