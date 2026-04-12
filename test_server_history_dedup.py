@@ -24,6 +24,16 @@ class ServerHistoryDedupTests(unittest.TestCase):
             r"begin_dt\s*=\s*now\s*-\s*timedelta\(seconds=max\(60,\s*ALARM_POLL_LOOKBACK_SEC\)\)",
         )
 
+    def test_history_poll_groups_telegram_notifications(self):
+        src = Path(__file__).with_name("server.py").read_text(encoding="utf-8")
+
+        self.assertRegex(
+            src,
+            r"ALARM_NOTIFY_GROUP_SEC\s*=\s*_env_int\(\"ALARM_NOTIFY_GROUP_SEC\",\s*60\)",
+        )
+        self.assertIn('"notified_event_keys": set()', src)
+        self.assertIn("notify_key = _alarm_notify_key(f)", src)
+
 
 if __name__ == "__main__":
     unittest.main()

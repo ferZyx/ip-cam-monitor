@@ -27,7 +27,6 @@ import socket
 import sys
 import threading
 import time
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
@@ -68,6 +67,12 @@ except ModuleNotFoundError:
         alarm_row_dt,
         choose_best_alarm_events,
     )
+
+try:
+    # When running as `py server.py` inside `stream_viewer/`
+    from telegram_sender import send_telegram_payload
+except ModuleNotFoundError:
+    from stream_viewer.telegram_sender import send_telegram_payload  # type: ignore
 
 try:
     # When running as `py server.py` inside `stream_viewer/`
@@ -134,6 +139,8 @@ MAX_FPS = 7  # Камера даёт ~6.6fps
 # Telegram (оставить пустым чтобы отключить)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_SSL_VERIFY = _env_bool("TELEGRAM_SSL_VERIFY", default=True)
+TELEGRAM_CA_BUNDLE = os.getenv("TELEGRAM_CA_BUNDLE", "").strip()
 ALARM_POLL_INTERVAL = _env_int("ALARM_POLL_INTERVAL", 300)  # backup
 ALARM_HISTORY_MAX = 200  # Макс тревог в памяти
 ALARM_PHOTOS_DIR = os.path.join(
@@ -168,6 +175,8 @@ ALARM_HISTORY_USE_EVENT_CLUSTER = _env_bool(
     "ALARM_HISTORY_USE_EVENT_CLUSTER", default=False
 )
 ALARM_POLL_LOOKBACK_SEC = _env_int("ALARM_POLL_LOOKBACK_SEC", 3600)
+ALARM_NOTIFY_GROUP_SEC = _env_int("ALARM_NOTIFY_GROUP_SEC", 60)
+QUIET_HTTP_ACCESS_LOGS = _env_bool("QUIET_HTTP_ACCESS_LOGS", default=True)
 
 
 # ─── Логгирование ─────────────────────────────────────────────────────────────
@@ -178,12 +187,15 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("stream_viewer")
+if QUIET_HTTP_ACCESS_LOGS:
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Принудительный TCP для RTSP (стабильнее UDP)
 # + таймауты на уровне ffmpeg (уменьшает зависания при потере пакетов)
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "rtsp_transport;tcp|stimeout;5000000|max_delay;500000"
 )
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 
 # ─── Flask ─────────────────────────────────────────────────────────────────────
 
@@ -598,6 +610,7 @@ alarm_store = {
     "lock": threading.Lock(),
     "known_files": set(),  # уже виденные файлы, чтобы не дублировать
     "known_event_keys": set(),  # уже виденные события (дедуп по времени)
+    "notified_event_keys": set(),  # события, уже отправленные в TG
 }
 
 # Ограничиваем параллелизм извлечения тревожных фото,
@@ -612,37 +625,15 @@ def send_telegram(text: str, photo_bytes: bytes | None = None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        if photo_bytes:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-            boundary = "----FormBoundary"
-            body = (
-                (
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="chat_id"\r\n\r\n{TELEGRAM_CHAT_ID}\r\n'
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="caption"\r\n'
-                    f"Content-Type: text/plain; charset=utf-8\r\n\r\n{text}\r\n"
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="document"; filename="alarm.jpg"\r\n'
-                    f"Content-Type: image/jpeg\r\n\r\n"
-                ).encode()
-                + photo_bytes
-                + f"\r\n--{boundary}--\r\n".encode()
-            )
-            req = urllib.request.Request(
-                url,
-                data=body,
-                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            )
-        else:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = json.dumps(
-                {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-            ).encode()
-            req = urllib.request.Request(
-                url, data=data, headers={"Content-Type": "application/json"}
-            )
-        urllib.request.urlopen(req, timeout=10)
+        send_telegram_payload(
+            bot_token=TELEGRAM_BOT_TOKEN,
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text,
+            photo_bytes=photo_bytes,
+            ssl_verify=TELEGRAM_SSL_VERIFY,
+            ca_bundle=TELEGRAM_CA_BUNDLE,
+            as_document=False,
+        )
         log.info(f"Telegram: отправлено")
     except Exception as e:
         log.warning(f"Telegram ошибка: {e}")
@@ -761,6 +752,15 @@ def _alarm_event_key(row: dict) -> str | None:
     gap = max(1, int(ALARM_EVENT_GROUP_SEC))
     bucket = int(dt.timestamp()) // gap
     return f"M:{bucket}"
+
+
+def _alarm_notify_key(row: dict) -> str | None:
+    dt = alarm_row_dt(row)
+    if dt is None:
+        return None
+    gap = max(1, int(ALARM_NOTIFY_GROUP_SEC))
+    bucket = int(dt.timestamp()) // gap
+    return f"TG:{bucket}"
 
 
 def _choose_best_alarm_events(
@@ -1042,10 +1042,12 @@ def alarm_history_poll_loop():
                 )
 
             new_count = 0
+            tg_count = 0
             for f in new_items:
                 fname = f.get("FileName", "")
                 file_type = str(f.get("__type", ""))
                 event_key = _alarm_event_key(f)
+                notify_key = _alarm_notify_key(f)
 
                 event_code = "M"
                 alarm_entry = {
@@ -1069,7 +1071,11 @@ def alarm_history_poll_loop():
                     ]
                 new_count += 1
 
-                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                should_notify = True
+                if notify_key and notify_key in alarm_store["notified_event_keys"]:
+                    should_notify = False
+
+                if should_notify and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
 
                     def job_hist(entry=f, type_name=alarm_entry["type"]):
                         dt_txt = str(entry.get("BeginTime", ""))
@@ -1113,9 +1119,16 @@ def alarm_history_poll_loop():
                         send_telegram(text, jpeg)
 
                     alarm_executor.submit(job_hist)
+                    tg_count += 1
+                    if notify_key:
+                        alarm_store["notified_event_keys"].add(notify_key)
 
             if new_count > 0:
-                log.info(f"История: +{new_count} тревог из OPFileQuery (TG)")
+                log.info(
+                    "История: +%d тревог из OPFileQuery, TG отправок: +%d",
+                    new_count,
+                    tg_count,
+                )
             elif ALARM_POLL_LOG_EVERY_TICK:
                 log.info("History poll: новых тревог нет")
 

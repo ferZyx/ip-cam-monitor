@@ -27,8 +27,11 @@ History poll: window=... loaded=... new=... raw(jpg=...,h264=...)
 
 ## Telegram: без сжатия фото
 
-- Отправка тревог переключена с `sendPhoto` на `sendDocument`.
-- Теперь JPEG уходит как файл `alarm.jpg`, Telegram не пережимает качество как у фото-превью.
+- Текущий режим отправки: `sendPhoto` (совместимость с текущей средой).
+- Добавлены параметры SSL-валидации для Telegram API:
+  - `TELEGRAM_SSL_VERIFY=1` (по умолчанию)
+  - `TELEGRAM_CA_BUNDLE=` (путь к корпоративному CA, если нужен)
+- Если в сети MITM/корп-прокси и сыпется `CERTIFICATE_VERIFY_FAILED`, можно временно поставить `TELEGRAM_SSL_VERIFY=0`.
 
 ## Практический вывод
 
