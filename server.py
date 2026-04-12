@@ -157,6 +157,7 @@ ALARM_TG_HISTORY_MAX_AGE_SEC = _env_int("ALARM_TG_HISTORY_MAX_AGE_SEC", 120)
 ALARM_EXTRACT_WORKERS = _env_int("ALARM_EXTRACT_WORKERS", 1)
 ALARM_EVENT_GROUP_SEC = _env_int("ALARM_EVENT_GROUP_SEC", 30)
 ALARM_BOOTSTRAP_HOURS = _env_int("ALARM_BOOTSTRAP_HOURS", 24)
+ALARM_POLL_LOG_EVERY_TICK = _env_bool("ALARM_POLL_LOG_EVERY_TICK", default=True)
 
 
 # ─── Логгирование ─────────────────────────────────────────────────────────────
@@ -1274,6 +1275,16 @@ def alarm_history_poll_loop():
             h264_files = query_alarms(cam, begin, end, "h264")
             files = _choose_best_alarm_events(jpg_files, h264_files)
 
+            if ALARM_POLL_LOG_EVERY_TICK:
+                log.info(
+                    "History poll: window=%s..%s raw(jpg=%d,h264=%d) events=%d",
+                    begin,
+                    end,
+                    len(jpg_files),
+                    len(h264_files),
+                    len(files),
+                )
+
             # Новые события, которых еще не видели (по event key)
             new_items = []
             for f in files:
@@ -1366,6 +1377,8 @@ def alarm_history_poll_loop():
 
             if new_count > 0:
                 log.info(f"История: +{new_count} тревог из OPFileQuery (TG)")
+            elif ALARM_POLL_LOG_EVERY_TICK:
+                log.info("History poll: новых тревог нет")
 
             with alarm_store["lock"]:
                 alarm_store["last_check"] = now.isoformat()
