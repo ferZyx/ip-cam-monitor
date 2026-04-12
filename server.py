@@ -62,6 +62,15 @@ except ModuleNotFoundError:
 
 try:
     # When running as `py server.py` inside `stream_viewer/`
+    from alarm_logic import alarm_row_dt, choose_best_alarm_events
+except ModuleNotFoundError:
+    from stream_viewer.alarm_logic import (  # type: ignore
+        alarm_row_dt,
+        choose_best_alarm_events,
+    )
+
+try:
+    # When running as `py server.py` inside `stream_viewer/`
     from stream_push import RemotePushRelay, should_enable_push
 except ModuleNotFoundError:
     from stream_viewer.stream_push import (  # type: ignore
@@ -130,7 +139,6 @@ ALARM_HISTORY_MAX = 200  # Макс тревог в памяти
 ALARM_PHOTOS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "alarm_photos"
 )
-ALARM_COOLDOWN = _env_int("ALARM_COOLDOWN", 5)
 ALARM_DEBUG_DUMP = _env_bool("ALARM_DEBUG_DUMP", default=False)
 
 # RTSP stability
@@ -151,13 +159,14 @@ REMOTE_PUSH_SCALE_HEIGHT = _env_int("REMOTE_PUSH_SCALE_HEIGHT", 720)
 REMOTE_PUSH_STREAM_INDEX = _env_int("REMOTE_PUSH_STREAM_INDEX", 1)
 
 # Alarm -> Telegram behavior
-ALARM_TG_FROM_HISTORY = _env_bool("ALARM_TG_FROM_HISTORY", default=False)
 ALARM_TG_REQUIRE_PHOTO = _env_bool("ALARM_TG_REQUIRE_PHOTO", default=True)
-ALARM_TG_HISTORY_MAX_AGE_SEC = _env_int("ALARM_TG_HISTORY_MAX_AGE_SEC", 120)
 ALARM_EXTRACT_WORKERS = _env_int("ALARM_EXTRACT_WORKERS", 1)
 ALARM_EVENT_GROUP_SEC = _env_int("ALARM_EVENT_GROUP_SEC", 30)
 ALARM_BOOTSTRAP_HOURS = _env_int("ALARM_BOOTSTRAP_HOURS", 24)
 ALARM_POLL_LOG_EVERY_TICK = _env_bool("ALARM_POLL_LOG_EVERY_TICK", default=True)
+ALARM_HISTORY_USE_EVENT_CLUSTER = _env_bool(
+    "ALARM_HISTORY_USE_EVENT_CLUSTER", default=False
+)
 
 
 # ─── Логгирование ─────────────────────────────────────────────────────────────
@@ -588,8 +597,6 @@ alarm_store = {
     "lock": threading.Lock(),
     "known_files": set(),  # уже виденные файлы, чтобы не дублировать
     "known_event_keys": set(),  # уже виденные события (дедуп по времени)
-    "last_alarm_time": 0,  # timestamp последней тревоги (для cooldown)
-    "callback_active": False,  # alarm callback запущен?
 }
 
 # Ограничиваем параллелизм извлечения тревожных фото,
@@ -746,40 +753,8 @@ def _find_closest_motion_file(files: list[dict], target: datetime) -> dict | Non
     return best
 
 
-def _alarm_row_dt(row: dict) -> datetime | None:
-    dt = _parse_dt(str(row.get("BeginTime", "")))
-    if dt is not None:
-        return dt
-    fname = str(row.get("FileName", ""))
-    m = re.search(r"/(\d{4}-\d{2}-\d{2})/\d{3}/(\d{2})\.(\d{2})\.(\d{2})-", fname)
-    if not m:
-        return None
-    date_s, hh, mm, ss = m.group(1), m.group(2), m.group(3), m.group(4)
-    return _parse_dt(f"{date_s} {hh}:{mm}:{ss}")
-
-
-def _alarm_duration_sec(row: dict) -> int:
-    bt = _alarm_row_dt(row)
-    et = _parse_dt(str(row.get("EndTime", "")))
-    if bt is None or et is None:
-        return 0
-    return max(0, int((et - bt).total_seconds()))
-
-
-def _alarm_best_score(row: dict) -> tuple[int, int, int, str]:
-    ftype = str(row.get("__type", "") or "").lower()
-    type_score = 1 if ftype == "h264" else 0
-    duration_score = _alarm_duration_sec(row)
-    raw_size = row.get("CstSize", 0)
-    try:
-        size_score = int(raw_size)
-    except Exception:
-        size_score = 0
-    return (type_score, duration_score, size_score, str(row.get("FileName", "")))
-
-
 def _alarm_event_key(row: dict) -> str | None:
-    dt = _alarm_row_dt(row)
+    dt = alarm_row_dt(row)
     if dt is None:
         return None
     gap = max(1, int(ALARM_EVENT_GROUP_SEC))
@@ -790,43 +765,9 @@ def _alarm_event_key(row: dict) -> str | None:
 def _choose_best_alarm_events(
     jpg_files: list[dict], h264_files: list[dict]
 ) -> list[dict]:
-    rows = []
-    for r in jpg_files:
-        rr = dict(r)
-        rr["__type"] = "jpg"
-        rows.append(rr)
-    for r in h264_files:
-        rr = dict(r)
-        rr["__type"] = "h264"
-        rows.append(rr)
-
-    rows = [r for r in rows if _alarm_row_dt(r) is not None]
-    rows.sort(key=lambda x: _alarm_row_dt(x) or datetime.min, reverse=True)
-    if not rows:
-        return []
-
-    clusters: list[list[dict]] = []
-    cluster_gap_sec = max(1, int(ALARM_EVENT_GROUP_SEC))
-    for row in rows:
-        row_dt = _alarm_row_dt(row)
-        if row_dt is None:
-            continue
-        if not clusters:
-            clusters.append([row])
-            continue
-        prev = clusters[-1][-1]
-        prev_dt = _alarm_row_dt(prev)
-        if prev_dt is None:
-            clusters[-1].append(row)
-            continue
-        if abs(int((prev_dt - row_dt).total_seconds())) <= cluster_gap_sec:
-            clusters[-1].append(row)
-        else:
-            clusters.append([row])
-
-    picked = [max(cluster, key=_alarm_best_score) for cluster in clusters if cluster]
-    picked.sort(key=lambda x: _alarm_row_dt(x) or datetime.min, reverse=True)
-    return picked
+    return choose_best_alarm_events(
+        jpg_files, h264_files, cluster_gap_sec=max(1, int(ALARM_EVENT_GROUP_SEC))
+    )
 
 
 def extract_alarm_photo_from_motion(
@@ -978,221 +919,14 @@ def get_alarm_photo_bytes(alarm_entry: dict) -> bytes | None:
     return state.get_frame()
 
 
-def on_alarm_callback(alarm_data, seq_number):
-    """
-    DVRIP alarm callback — вызывается МГНОВЕННО при тревоге.
-    Сохраняет текущий кадр из RTSP буфера (уже в памяти, задержка ~0мс).
-    """
-    now = time.time()
-
-    # Cooldown: не реагируем чаще чем раз в ALARM_COOLDOWN секунд
-    if now - alarm_store["last_alarm_time"] < ALARM_COOLDOWN:
-        return
-    alarm_store["last_alarm_time"] = now
-
-    dt_now = datetime.now()
-    time_str = dt_now.strftime("%Y-%m-%d %H:%M:%S")
-    log.info(f"🚨 ТРЕВОГА (callback #{seq_number}): {alarm_data}")
-
-    # Определяем тип тревоги из callback данных
-    event_type = "Событие"
-    event_code = "*"
-    if isinstance(alarm_data, dict):
-        channel = alarm_data.get("Channel", alarm_data.get("channel", 0))
-        status = alarm_data.get("Status", alarm_data.get("Event", ""))
-        if isinstance(status, str):
-            status_lower = status.lower()
-            if "motiondetect" in status_lower or "md" in status_lower:
-                event_type = "Движение"
-                event_code = "M"
-            elif "human" in status_lower:
-                event_type = "Человек"
-                event_code = "H"
-            elif "videoloss" in status_lower:
-                event_type = "Потеря видео"
-                event_code = "L"
-            elif "videoblind" in status_lower or "mask" in status_lower:
-                event_type = "Маска камеры"
-                event_code = "V"
-            else:
-                event_type = status
-    elif isinstance(alarm_data, list):
-        for item in alarm_data:
-            if isinstance(item, dict):
-                status = item.get("Status", item.get("Event", ""))
-                if isinstance(status, str) and status:
-                    status_lower = status.lower()
-                    if "motion" in status_lower:
-                        event_type = "Движение"
-                        event_code = "M"
-                    else:
-                        event_type = status
-                    break
-
-    # Новый подход: достаём фото ИЗ АРХИВНОГО M-РОЛИКА, а не из live-буфера.
-    # Важно: НЕ блокируем callback; обработка идет через executor.
-    def job():
-        photo = None
-        photo_meta = {}
-        try:
-            photo, photo_meta = extract_alarm_photo_hybrid(
-                state.camera_ip or KNOWN_IP,
-                dt_now,
-                dvrip_port=DVRIP_PORT,
-                username=CAMERA_USER,
-                password=CAMERA_PASS,
-                debug_dir_root=ALARM_PHOTOS_DIR,
-                debug=ALARM_DEBUG_DUMP,
-                timeout_sec=60,
-                download_retries=2,
-                bottom_white_threshold=0.25,
-            )
-            if not photo:
-                # Fallback: если архивное фото не получилось, берём текущий кадр (лучше, чем ничего)
-                photo = capture_frame_from_buffer() or dvrip_opsnap(
-                    state.camera_ip or KNOWN_IP
-                )
-        except Exception as e:
-            log.warning(f"alarm photo extraction failed: {e}")
-
-        file_ref = None
-        try:
-            chosen = None
-            if isinstance(photo_meta, dict):
-                chosen = photo_meta.get("chosen")
-                if chosen == "idea1":
-                    file_ref = (
-                        photo_meta.get("idea1", {}).get("picked", {}).get("FileName")
-                    )
-                if chosen == "motion":
-                    file_ref = (
-                        photo_meta.get("motion", {}).get("picked", {}).get("FileName")
-                    )
-        except Exception:
-            file_ref = None
-
-        photo_file = None
-        if photo:
-            alarm_id = dt_now.strftime("%Y-%m-%d_%H_%M_%S")
-            photo_file = save_alarm_photo(alarm_id, photo)
-            log.info(
-                f"📷 Фото тревоги (new): {photo_file} ({len(photo):,} байт) meta={photo_meta}"
-            )
-
-        alarm_entry = {
-            "time": time_str,
-            "end_time": time_str,
-            "type": event_type,
-            "type_code": event_code,
-            "file": file_ref or f"callback_seq{seq_number}",
-            "size": len(photo) if photo else 0,
-            "photo_file": photo_file,
-            "source": "realtime",
-            "photo_meta": photo_meta,
-        }
-
-        with alarm_store["lock"]:
-            alarm_store["alarms"] = ([alarm_entry] + alarm_store["alarms"])[
-                :ALARM_HISTORY_MAX
-            ]
-            alarm_store["last_check"] = dt_now.isoformat()
-            if alarm_entry["file"]:
-                alarm_store["known_files"].add(alarm_entry["file"])
-
-        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            text = f"🚨 {event_type}\n🕐 {time_str}"
-            if photo_meta.get("file"):
-                text += f"\n📼 {photo_meta.get('file')}"
-            if (not ALARM_TG_REQUIRE_PHOTO) or photo:
-                send_telegram(text, photo)
-
-    alarm_executor.submit(job)
-
-
-def alarm_callback_loop():
-    """
-    Фоновый поток: держит DVRIP alarm callback соединение.
-    При обрыве — переподключается.
-    """
-    if (not HAS_DVRIP) or (DVRIPCam is None):
-        log.warning("DVRIP недоступен — мониторинг тревог отключён")
-        return
-
-    log.info("Мониторинг тревог: DVRIP alarm callback (реальное время)")
-
-    while True:
-        # Ждём пока камера будет найдена
-        if not state.camera_ip:
-            time.sleep(5)
-            continue
-
-        cam = None
-        try:
-            cam = DVRIPCam(
-                state.camera_ip, port=DVRIP_PORT, user=CAMERA_USER, password=CAMERA_PASS
-            )
-            if not cam.login():
-                log.warning("Alarm callback: DVRIP логин неуспешен")
-                time.sleep(10)
-                continue
-
-            # Регистрируем callback
-            cam.setAlarm(on_alarm_callback)
-
-            # Запускаем alarm listener (отправляет AlarmSet + стартует thread)
-            # Делаем thread daemon чтобы не блокировал выход
-            log.info("🔔 Alarm callback: подключаюсь...")
-
-            # Ручной запуск: AlarmSet команда
-            try:
-                cam.send(
-                    cam.QCODES["AlarmSet"],
-                    {"Name": "", "SessionID": "0x%08X" % cam.session},
-                )
-            except Exception as e:
-                log.warning(f"AlarmSet ошибка: {e} — пробую alarmStart")
-
-            # Запускаем alarm thread
-            cam.alarm = threading.Thread(
-                name="DVRAlarm%08X" % cam.session,
-                target=cam.alarm_thread,
-                args=[cam.busy],
-                daemon=True,
-            )
-            cam.alarm.start()
-            alarm_store["callback_active"] = True
-            log.info("✅ Alarm callback активен — ожидаю тревоги в реальном времени")
-
-            # Держим соединение живым, проверяем thread
-            while cam.alarm.is_alive():
-                time.sleep(5)
-
-            log.warning("Alarm thread завершился — переподключение")
-            alarm_store["callback_active"] = False
-
-        except Exception as e:
-            log.warning(f"Alarm callback ошибка: {e}")
-            alarm_store["callback_active"] = False
-        finally:
-            if cam:
-                try:
-                    cam.close()
-                except Exception:
-                    pass
-
-        time.sleep(RECONNECT_DELAY)
-
-
 def alarm_history_poll_loop():
     """
-    Backup: периодически опрашивает OPFileQuery для сбора истории тревог.
-    Не делает фото (фото делает callback), только пополняет список.
+    Периодически опрашивает OPFileQuery для сбора новых тревог.
+    Новые тревоги отправляет в Telegram.
     """
     if (not HAS_DVRIP) or (DVRIPCam is None):
         return
 
-    # Даём время callback-у запуститься
-    time.sleep(30)
     log.info(f"Backup: история тревог каждые {ALARM_POLL_INTERVAL}с")
 
     bootstrapped = False
@@ -1220,7 +954,13 @@ def alarm_history_poll_loop():
                 end_boot = now.strftime("%Y-%m-%d %H:%M:%S")
                 jpg_boot = query_alarms(cam, begin_boot, end_boot, "jpg")
                 h264_boot = query_alarms(cam, begin_boot, end_boot, "h264")
-                seed_rows = _choose_best_alarm_events(jpg_boot, h264_boot)
+                if ALARM_HISTORY_USE_EVENT_CLUSTER:
+                    seed_rows = _choose_best_alarm_events(jpg_boot, h264_boot)
+                else:
+                    seed_rows = [dict(r, __type="jpg") for r in jpg_boot]
+                    seed_rows.sort(
+                        key=lambda x: alarm_row_dt(x) or datetime.min, reverse=True
+                    )
 
                 with alarm_store["lock"]:
                     for r in seed_rows:
@@ -1277,16 +1017,24 @@ def alarm_history_poll_loop():
 
             jpg_files = query_alarms(cam, begin, end, "jpg")
             h264_files = query_alarms(cam, begin, end, "h264")
-            files = _choose_best_alarm_events(jpg_files, h264_files)
+            if ALARM_HISTORY_USE_EVENT_CLUSTER:
+                files = _choose_best_alarm_events(jpg_files, h264_files)
+            else:
+                files = [dict(r, __type="jpg") for r in jpg_files]
+                files.sort(key=lambda x: alarm_row_dt(x) or datetime.min, reverse=True)
 
             # Новые события, которых еще не видели (по event key)
             new_items = []
             for f in files:
                 event_key = _alarm_event_key(f)
-                fname = f.get("FileName", "")
-                if not event_key:
+                fname = str(f.get("FileName", ""))
+                if fname and fname in alarm_store["known_files"]:
                     continue
-                if event_key in alarm_store["known_event_keys"]:
+                if (
+                    (not fname)
+                    and event_key
+                    and event_key in alarm_store["known_event_keys"]
+                ):
                     continue
                 new_items.append(f)
 
@@ -1329,13 +1077,7 @@ def alarm_history_poll_loop():
                     ]
                 new_count += 1
 
-                # Если callback пропустил — опционально отправим TG из history
-                if ALARM_TG_FROM_HISTORY and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                    bt = _parse_dt(str(f.get("BeginTime", "")))
-                    if bt is not None:
-                        age_sec = (datetime.now() - bt).total_seconds()
-                        if age_sec > ALARM_TG_HISTORY_MAX_AGE_SEC:
-                            continue
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
 
                     def job_hist(entry=f, type_name=alarm_entry["type"]):
                         dt_txt = str(entry.get("BeginTime", ""))
@@ -1629,11 +1371,6 @@ def main():
 
     capture_thread = threading.Thread(target=capture_loop, daemon=True, name="capture")
     capture_thread.start()
-
-    alarm_callback_thread = threading.Thread(
-        target=alarm_callback_loop, daemon=True, name="alarm_callback"
-    )
-    alarm_callback_thread.start()
 
     alarm_hist_thread = threading.Thread(
         target=alarm_history_poll_loop, daemon=True, name="alarm_history"
