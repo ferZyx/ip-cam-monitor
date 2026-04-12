@@ -605,7 +605,7 @@ def send_telegram(text: str, photo_bytes: bytes | None = None):
         return
     try:
         if photo_bytes:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
             boundary = "----FormBoundary"
             body = (
                 (
@@ -615,7 +615,7 @@ def send_telegram(text: str, photo_bytes: bytes | None = None):
                     f'Content-Disposition: form-data; name="caption"\r\n'
                     f"Content-Type: text/plain; charset=utf-8\r\n\r\n{text}\r\n"
                     f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="photo"; filename="alarm.jpg"\r\n'
+                    f'Content-Disposition: form-data; name="document"; filename="alarm.jpg"\r\n'
                     f"Content-Type: image/jpeg\r\n\r\n"
                 ).encode()
                 + photo_bytes
@@ -1252,7 +1252,11 @@ def alarm_history_poll_loop():
 
                 bootstrapped = True
                 log.info(
-                    f"History bootstrap: запомнено {len(seed_rows)} тревог (без TG)"
+                    "History bootstrap: loaded=%d new=%d raw(jpg=%d,h264=%d) (без TG)",
+                    len(seed_rows),
+                    len(seed_rows),
+                    len(jpg_boot),
+                    len(h264_boot),
                 )
                 time.sleep(ALARM_POLL_INTERVAL)
                 continue
@@ -1275,16 +1279,6 @@ def alarm_history_poll_loop():
             h264_files = query_alarms(cam, begin, end, "h264")
             files = _choose_best_alarm_events(jpg_files, h264_files)
 
-            if ALARM_POLL_LOG_EVERY_TICK:
-                log.info(
-                    "History poll: window=%s..%s raw(jpg=%d,h264=%d) events=%d",
-                    begin,
-                    end,
-                    len(jpg_files),
-                    len(h264_files),
-                    len(files),
-                )
-
             # Новые события, которых еще не видели (по event key)
             new_items = []
             for f in files:
@@ -1295,6 +1289,17 @@ def alarm_history_poll_loop():
                 if event_key in alarm_store["known_event_keys"]:
                     continue
                 new_items.append(f)
+
+            if ALARM_POLL_LOG_EVERY_TICK:
+                log.info(
+                    "History poll: window=%s..%s loaded=%d new=%d raw(jpg=%d,h264=%d)",
+                    begin,
+                    end,
+                    len(files),
+                    len(new_items),
+                    len(jpg_files),
+                    len(h264_files),
+                )
 
             new_count = 0
             for f in new_items:
@@ -1624,6 +1629,11 @@ def main():
 
     capture_thread = threading.Thread(target=capture_loop, daemon=True, name="capture")
     capture_thread.start()
+
+    alarm_callback_thread = threading.Thread(
+        target=alarm_callback_loop, daemon=True, name="alarm_callback"
+    )
+    alarm_callback_thread.start()
 
     alarm_hist_thread = threading.Thread(
         target=alarm_history_poll_loop, daemon=True, name="alarm_history"
