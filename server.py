@@ -61,6 +61,15 @@ except ModuleNotFoundError:
     )
 
 try:
+    # When running as `py server.py` inside `stream_viewer/`
+    from stream_push import RemotePushRelay, should_enable_push
+except ModuleNotFoundError:
+    from stream_viewer.stream_push import (  # type: ignore
+        RemotePushRelay,
+        should_enable_push,
+    )
+
+try:
     import cv2
 except ImportError:
     print("opencv-python не установлен. Выполните: pip install opencv-python")
@@ -126,6 +135,13 @@ ALARM_DEBUG_DUMP = _env_bool("ALARM_DEBUG_DUMP", default=False)
 
 # RTSP stability
 RTSP_NO_FRAME_TIMEOUT_SEC = _env_int("RTSP_NO_FRAME_TIMEOUT_SEC", 15)
+
+# Remote upstream push (optional)
+REMOTE_PUSH_URL = os.getenv("REMOTE_PUSH_URL", "").strip()
+REMOTE_PUSH_TRANSPORT = (
+    os.getenv("REMOTE_PUSH_TRANSPORT", "tcp").strip() or "tcp"
+).lower()
+FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg").strip() or "ffmpeg"
 
 # Alarm -> Telegram behavior
 ALARM_TG_FROM_HISTORY = _env_bool("ALARM_TG_FROM_HISTORY", default=False)
@@ -203,6 +219,7 @@ class CameraState:
         uptime = 0
         if self.uptime_start:
             uptime = int(time.time() - self.uptime_start)
+        relay_status = remote_relay.status()
         return {
             "status": self.status,
             "error": self.error,
@@ -213,10 +230,14 @@ class CameraState:
             "uptime_seconds": uptime,
             "frame_count": self.frame_count,
             "clients": self.clients,
+            "remote_push_enabled": relay_status["enabled"],
+            "remote_push_running": relay_status["running"],
+            "remote_push_target": relay_status["target"],
         }
 
 
 state = CameraState()
+remote_relay = RemotePushRelay(ffmpeg_bin=FFMPEG_BIN, transport=REMOTE_PUSH_TRANSPORT)
 
 
 # ─── Обнаружение камеры ───────────────────────────────────────────────────────
@@ -498,15 +519,29 @@ def capture_loop():
             cap = try_rtsp(camera_ip)
 
             if cap is not None:
+                if should_enable_push(REMOTE_PUSH_URL):
+                    stream_idx = 0 if state.mode == "rtsp_main" else 1
+                    source_rtsp_url = build_rtsp_url(camera_ip, stream_idx)
+                    try:
+                        remote_relay.ensure_running(source_rtsp_url, REMOTE_PUSH_URL)
+                        log.info(f"Remote push enabled -> {REMOTE_PUSH_URL}")
+                    except FileNotFoundError:
+                        log.error(
+                            f"Remote push: ffmpeg not found ('{FFMPEG_BIN}'). Install ffmpeg or set FFMPEG_BIN"
+                        )
+                    except Exception as push_error:
+                        log.warning(f"Remote push start failed: {push_error}")
                 rtsp_read_loop(cap)
             else:
                 # 3. Fallback на DVRIP
+                remote_relay.stop()
                 log.warning("RTSP недоступен — переход на DVRIP snapshot")
                 dvrip_snapshot_loop(camera_ip)
 
         except Exception as e:
             log.error(f"Критическая ошибка: {e}")
             state.set_status("error", str(e))
+            remote_relay.stop()
 
         log.info(f"Переподключение через {RECONNECT_DELAY} сек...")
         time.sleep(RECONNECT_DELAY)
@@ -1411,6 +1446,8 @@ def main():
     log.info(f"Снимок:        http://localhost:{WEB_PORT}/snapshot")
     log.info(f"Статус JSON:   http://localhost:{WEB_PORT}/status")
     log.info(f"Тревоги JSON:  http://localhost:{WEB_PORT}/alarms")
+    if should_enable_push(REMOTE_PUSH_URL):
+        log.info(f"Remote push:   {REMOTE_PUSH_URL} (ffmpeg={FFMPEG_BIN})")
 
     app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, use_reloader=False)
 
