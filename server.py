@@ -167,6 +167,7 @@ ALARM_POLL_LOG_EVERY_TICK = _env_bool("ALARM_POLL_LOG_EVERY_TICK", default=True)
 ALARM_HISTORY_USE_EVENT_CLUSTER = _env_bool(
     "ALARM_HISTORY_USE_EVENT_CLUSTER", default=False
 )
+ALARM_POLL_LOOKBACK_SEC = _env_int("ALARM_POLL_LOOKBACK_SEC", 3600)
 
 
 # ─── Логгирование ─────────────────────────────────────────────────────────────
@@ -1001,16 +1002,7 @@ def alarm_history_poll_loop():
                 time.sleep(ALARM_POLL_INTERVAL)
                 continue
 
-            with alarm_store["lock"]:
-                last_check_iso = alarm_store.get("last_check")
-
-            begin_dt = now - timedelta(seconds=max(ALARM_POLL_INTERVAL * 2, 60))
-            if isinstance(last_check_iso, str) and last_check_iso:
-                try:
-                    prev = datetime.fromisoformat(last_check_iso)
-                    begin_dt = prev - timedelta(seconds=max(2, ALARM_EVENT_GROUP_SEC))
-                except Exception:
-                    pass
+            begin_dt = now - timedelta(seconds=max(60, ALARM_POLL_LOOKBACK_SEC))
 
             begin = begin_dt.strftime("%Y-%m-%d %H:%M:%S")
             end = now.strftime("%Y-%m-%d %H:%M:%S")
