@@ -337,30 +337,75 @@ def extract_alarm_jpeg(file_type: str, raw_1426: bytes) -> Extracted:
 def choose_last_alarms(
     jpg_files: list[dict], h264_files: list[dict], limit: int
 ) -> list[dict]:
-    # Prefer native jpg alarms if present.
-    if len(jpg_files) >= limit:
-        return jpg_files[:limit]
+    def _as_dt(row: dict) -> datetime | None:
+        dt = row.get("__dt")
+        if isinstance(dt, datetime):
+            return dt
+        dt = _parse_dt(str(row.get("BeginTime", "")))
+        if dt is not None:
+            return dt
+        return _dt_from_filename(str(row.get("FileName", "")))
+
+    def _duration_sec(row: dict) -> int:
+        bt = _as_dt(row)
+        et = _parse_dt(str(row.get("EndTime", "")))
+        if bt is None or et is None:
+            return 0
+        return max(0, int((et - bt).total_seconds()))
+
+    def _event_score(row: dict) -> tuple[int, int, int, str]:
+        ftype = str(row.get("__type", "") or "").lower()
+        type_score = 1 if ftype == "h264" else 0
+
+        raw_size = row.get("CstSize", 0)
+        try:
+            size_score = int(raw_size)
+        except Exception:
+            size_score = 0
+
+        duration_score = _duration_sec(row)
+        fname = str(row.get("FileName", ""))
+        return (type_score, duration_score, size_score, fname)
+
+    rows: list[dict] = []
+    for r in jpg_files:
+        rr = dict(r)
+        rr.setdefault("__type", "jpg")
+        rr["__dt"] = _as_dt(rr)
+        rows.append(rr)
+    for r in h264_files:
+        rr = dict(r)
+        rr.setdefault("__type", "h264")
+        rr["__dt"] = _as_dt(rr)
+        rows.append(rr)
+
+    rows = [r for r in rows if r.get("__dt") is not None]
+    rows.sort(key=lambda x: x["__dt"], reverse=True)
+    if not rows:
+        return []
+
+    cluster_gap_sec = 30
+    clusters: list[list[dict]] = []
+    for row in rows:
+        if not clusters:
+            clusters.append([row])
+            continue
+
+        prev = clusters[-1][-1]
+        curr_dt = row["__dt"]
+        prev_dt = prev["__dt"]
+        if abs(int((prev_dt - curr_dt).total_seconds())) <= cluster_gap_sec:
+            clusters[-1].append(row)
+        else:
+            clusters.append([row])
 
     picked: list[dict] = []
-    seen_keys: set[str] = set()
+    for cluster in clusters:
+        best = max(cluster, key=_event_score)
+        picked.append(best)
+        if len(picked) >= limit:
+            break
 
-    def add(rows: list[dict]):
-        for r in rows:
-            bt = str(r.get("BeginTime", ""))
-            fn = str(r.get("FileName", ""))
-            key = bt + "|" + fn
-            if not bt and not fn:
-                continue
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            picked.append(r)
-            if len(picked) >= limit:
-                return
-
-    add(jpg_files)
-    if len(picked) < limit:
-        add(h264_files)
     return picked[:limit]
 
 

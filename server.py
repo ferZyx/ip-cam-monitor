@@ -155,6 +155,8 @@ ALARM_TG_FROM_HISTORY = _env_bool("ALARM_TG_FROM_HISTORY", default=False)
 ALARM_TG_REQUIRE_PHOTO = _env_bool("ALARM_TG_REQUIRE_PHOTO", default=True)
 ALARM_TG_HISTORY_MAX_AGE_SEC = _env_int("ALARM_TG_HISTORY_MAX_AGE_SEC", 120)
 ALARM_EXTRACT_WORKERS = _env_int("ALARM_EXTRACT_WORKERS", 1)
+ALARM_EVENT_GROUP_SEC = _env_int("ALARM_EVENT_GROUP_SEC", 30)
+ALARM_BOOTSTRAP_HOURS = _env_int("ALARM_BOOTSTRAP_HOURS", 24)
 
 
 # ─── Логгирование ─────────────────────────────────────────────────────────────
@@ -584,6 +586,7 @@ alarm_store = {
     "last_check": None,
     "lock": threading.Lock(),
     "known_files": set(),  # уже виденные файлы, чтобы не дублировать
+    "known_event_keys": set(),  # уже виденные события (дедуп по времени)
     "last_alarm_time": 0,  # timestamp последней тревоги (для cooldown)
     "callback_active": False,  # alarm callback запущен?
 }
@@ -740,6 +743,89 @@ def _find_closest_motion_file(files: list[dict], target: datetime) -> dict | Non
             best = f
             best_delta = delta
     return best
+
+
+def _alarm_row_dt(row: dict) -> datetime | None:
+    dt = _parse_dt(str(row.get("BeginTime", "")))
+    if dt is not None:
+        return dt
+    fname = str(row.get("FileName", ""))
+    m = re.search(r"/(\d{4}-\d{2}-\d{2})/\d{3}/(\d{2})\.(\d{2})\.(\d{2})-", fname)
+    if not m:
+        return None
+    date_s, hh, mm, ss = m.group(1), m.group(2), m.group(3), m.group(4)
+    return _parse_dt(f"{date_s} {hh}:{mm}:{ss}")
+
+
+def _alarm_duration_sec(row: dict) -> int:
+    bt = _alarm_row_dt(row)
+    et = _parse_dt(str(row.get("EndTime", "")))
+    if bt is None or et is None:
+        return 0
+    return max(0, int((et - bt).total_seconds()))
+
+
+def _alarm_best_score(row: dict) -> tuple[int, int, int, str]:
+    ftype = str(row.get("__type", "") or "").lower()
+    type_score = 1 if ftype == "h264" else 0
+    duration_score = _alarm_duration_sec(row)
+    raw_size = row.get("CstSize", 0)
+    try:
+        size_score = int(raw_size)
+    except Exception:
+        size_score = 0
+    return (type_score, duration_score, size_score, str(row.get("FileName", "")))
+
+
+def _alarm_event_key(row: dict) -> str | None:
+    dt = _alarm_row_dt(row)
+    if dt is None:
+        return None
+    gap = max(1, int(ALARM_EVENT_GROUP_SEC))
+    bucket = int(dt.timestamp()) // gap
+    return f"M:{bucket}"
+
+
+def _choose_best_alarm_events(
+    jpg_files: list[dict], h264_files: list[dict]
+) -> list[dict]:
+    rows = []
+    for r in jpg_files:
+        rr = dict(r)
+        rr["__type"] = "jpg"
+        rows.append(rr)
+    for r in h264_files:
+        rr = dict(r)
+        rr["__type"] = "h264"
+        rows.append(rr)
+
+    rows = [r for r in rows if _alarm_row_dt(r) is not None]
+    rows.sort(key=lambda x: _alarm_row_dt(x) or datetime.min, reverse=True)
+    if not rows:
+        return []
+
+    clusters: list[list[dict]] = []
+    cluster_gap_sec = max(1, int(ALARM_EVENT_GROUP_SEC))
+    for row in rows:
+        row_dt = _alarm_row_dt(row)
+        if row_dt is None:
+            continue
+        if not clusters:
+            clusters.append([row])
+            continue
+        prev = clusters[-1][-1]
+        prev_dt = _alarm_row_dt(prev)
+        if prev_dt is None:
+            clusters[-1].append(row)
+            continue
+        if abs(int((prev_dt - row_dt).total_seconds())) <= cluster_gap_sec:
+            clusters[-1].append(row)
+        else:
+            clusters.append([row])
+
+    picked = [max(cluster, key=_alarm_best_score) for cluster in clusters if cluster]
+    picked.sort(key=lambda x: _alarm_row_dt(x) or datetime.min, reverse=True)
+    return picked
 
 
 def extract_alarm_photo_from_motion(
@@ -1108,6 +1194,8 @@ def alarm_history_poll_loop():
     time.sleep(30)
     log.info(f"Backup: история тревог каждые {ALARM_POLL_INTERVAL}с")
 
+    bootstrapped = False
+
     while True:
         if not state.camera_ip:
             time.sleep(10)
@@ -1123,25 +1211,85 @@ def alarm_history_poll_loop():
                 continue
 
             now = datetime.now()
-            begin = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+            if not bootstrapped:
+                begin_boot = (
+                    now - timedelta(hours=max(1, ALARM_BOOTSTRAP_HOURS))
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                end_boot = now.strftime("%Y-%m-%d %H:%M:%S")
+                jpg_boot = query_alarms(cam, begin_boot, end_boot, "jpg")
+                h264_boot = query_alarms(cam, begin_boot, end_boot, "h264")
+                seed_rows = _choose_best_alarm_events(jpg_boot, h264_boot)
+
+                with alarm_store["lock"]:
+                    for r in seed_rows:
+                        key = _alarm_event_key(r)
+                        fname = str(r.get("FileName", ""))
+                        if key:
+                            alarm_store["known_event_keys"].add(key)
+                        if fname:
+                            alarm_store["known_files"].add(fname)
+
+                        alarm_store["alarms"] = (
+                            [
+                                {
+                                    "time": r.get("BeginTime", ""),
+                                    "end_time": r.get("EndTime", ""),
+                                    "type": parse_alarm_event("M"),
+                                    "type_code": "M",
+                                    "file": fname,
+                                    "size": 0,
+                                    "photo_file": None,
+                                    "source": "bootstrap",
+                                    "file_type": str(r.get("__type", "")),
+                                }
+                            ]
+                            + alarm_store["alarms"]
+                        )[:ALARM_HISTORY_MAX]
+
+                    alarm_store["last_check"] = now.isoformat()
+
+                bootstrapped = True
+                log.info(
+                    f"History bootstrap: запомнено {len(seed_rows)} тревог (без TG)"
+                )
+                time.sleep(ALARM_POLL_INTERVAL)
+                continue
+
+            with alarm_store["lock"]:
+                last_check_iso = alarm_store.get("last_check")
+
+            begin_dt = now - timedelta(seconds=max(ALARM_POLL_INTERVAL * 2, 60))
+            if isinstance(last_check_iso, str) and last_check_iso:
+                try:
+                    prev = datetime.fromisoformat(last_check_iso)
+                    begin_dt = prev - timedelta(seconds=max(2, ALARM_EVENT_GROUP_SEC))
+                except Exception:
+                    pass
+
+            begin = begin_dt.strftime("%Y-%m-%d %H:%M:%S")
             end = now.strftime("%Y-%m-%d %H:%M:%S")
 
-            # История тревог: именно motion-ролики (Event=M, Type=h264)
-            files = query_alarms(cam, begin, end, "h264")
+            jpg_files = query_alarms(cam, begin, end, "jpg")
+            h264_files = query_alarms(cam, begin, end, "h264")
+            files = _choose_best_alarm_events(jpg_files, h264_files)
 
-            # Собираем новые элементы, которых еще не видели
+            # Новые события, которых еще не видели (по event key)
             new_items = []
             for f in files:
+                event_key = _alarm_event_key(f)
                 fname = f.get("FileName", "")
-                if not fname:
+                if not event_key:
                     continue
-                if fname in alarm_store["known_files"]:
+                if event_key in alarm_store["known_event_keys"]:
                     continue
                 new_items.append(f)
 
             new_count = 0
             for f in new_items:
                 fname = f.get("FileName", "")
+                file_type = str(f.get("__type", ""))
+                event_key = _alarm_event_key(f)
 
                 event_code = "M"
                 alarm_entry = {
@@ -1153,9 +1301,12 @@ def alarm_history_poll_loop():
                     "size": 0,
                     "photo_file": None,
                     "source": "history",
+                    "file_type": file_type,
                 }
 
                 alarm_store["known_files"].add(fname)
+                if event_key:
+                    alarm_store["known_event_keys"].add(event_key)
                 with alarm_store["lock"]:
                     alarm_store["alarms"] = ([alarm_entry] + alarm_store["alarms"])[
                         :ALARM_HISTORY_MAX
@@ -1461,15 +1612,10 @@ def main():
     capture_thread = threading.Thread(target=capture_loop, daemon=True, name="capture")
     capture_thread.start()
 
-    # alarm_cb_thread = threading.Thread(
-    #     target=alarm_callback_loop, daemon=True, name="alarm_callback"
-    # )
-    # alarm_cb_thread.start()
-    #
-    # alarm_hist_thread = threading.Thread(
-    #     target=alarm_history_poll_loop, daemon=True, name="alarm_history"
-    # )
-    # alarm_hist_thread.start()
+    alarm_hist_thread = threading.Thread(
+        target=alarm_history_poll_loop, daemon=True, name="alarm_history"
+    )
+    alarm_hist_thread.start()
 
     log.info(f"Веб-интерфейс: http://localhost:{WEB_PORT}")
     log.info(f"MJPEG поток:   http://localhost:{WEB_PORT}/stream")
