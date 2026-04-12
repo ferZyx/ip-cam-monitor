@@ -46,6 +46,12 @@ Remote push (опционально, для просмотра вне дома):
 - `REMOTE_PUSH_TRANSPORT` (`tcp` по умолчанию)
 - `FFMPEG_BIN` (`ffmpeg` по умолчанию)
 - `REMOTE_PUSH_LOG_TO_CONSOLE` (`1` по умолчанию, лог ffmpeg в консоль сервера)
+- `REMOTE_PUSH_CODEC` (`libx264` рекомендуется для стабильности)
+- `REMOTE_PUSH_PRESET` (`veryfast` по умолчанию)
+- `REMOTE_PUSH_TUNE` (`zerolatency` по умолчанию)
+- `REMOTE_PUSH_FPS` (`12` по умолчанию)
+- `REMOTE_PUSH_SCALE_HEIGHT` (`720` по умолчанию)
+- `REMOTE_PUSH_STREAM_INDEX` (`1` по умолчанию, sub-stream)
 
 Если `REMOTE_PUSH_URL` задан, сервер поднимает фоновый `ffmpeg` и пушит RTSP камеры на внешний сервер.
 Логи ffmpeg будут видны прямо в окне, где запущен `start.bat` / `py server.py`.

@@ -143,6 +143,12 @@ REMOTE_PUSH_TRANSPORT = (
 ).lower()
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg").strip() or "ffmpeg"
 REMOTE_PUSH_LOG_TO_CONSOLE = _env_bool("REMOTE_PUSH_LOG_TO_CONSOLE", default=True)
+REMOTE_PUSH_CODEC = os.getenv("REMOTE_PUSH_CODEC", "libx264").strip() or "libx264"
+REMOTE_PUSH_PRESET = os.getenv("REMOTE_PUSH_PRESET", "veryfast").strip() or "veryfast"
+REMOTE_PUSH_TUNE = os.getenv("REMOTE_PUSH_TUNE", "zerolatency").strip() or "zerolatency"
+REMOTE_PUSH_FPS = _env_int("REMOTE_PUSH_FPS", 12)
+REMOTE_PUSH_SCALE_HEIGHT = _env_int("REMOTE_PUSH_SCALE_HEIGHT", 720)
+REMOTE_PUSH_STREAM_INDEX = _env_int("REMOTE_PUSH_STREAM_INDEX", 1)
 
 # Alarm -> Telegram behavior
 ALARM_TG_FROM_HISTORY = _env_bool("ALARM_TG_FROM_HISTORY", default=False)
@@ -243,6 +249,11 @@ remote_relay = RemotePushRelay(
     transport=REMOTE_PUSH_TRANSPORT,
     log_to_console=REMOTE_PUSH_LOG_TO_CONSOLE,
     logger=log,
+    video_codec=REMOTE_PUSH_CODEC,
+    preset=REMOTE_PUSH_PRESET,
+    tune=REMOTE_PUSH_TUNE,
+    fps=REMOTE_PUSH_FPS,
+    scale_height=REMOTE_PUSH_SCALE_HEIGHT,
 )
 
 
@@ -435,7 +446,7 @@ def dvrip_snapshot_loop(ip: str):
 # ─── Захват: RTSP цикл чтения ────────────────────────────────────────────────
 
 
-def rtsp_read_loop(cap: cv2.VideoCapture):
+def rtsp_read_loop(cap: cv2.VideoCapture, remote_source_url: str | None = None):
     """Читаем кадры из RTSP и кодируем в JPEG для раздачи."""
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
     fps_counter = 0
@@ -444,6 +455,7 @@ def rtsp_read_loop(cap: cv2.VideoCapture):
     last_frame_time = 0
     last_good_frame_time = time.time()
     consecutive_errors = 0
+    last_push_check = 0.0
 
     state.set_status("streaming")
     log.info(f"RTSP read loop started (max_fps={MAX_FPS}, quality={JPEG_QUALITY})")
@@ -470,6 +482,15 @@ def rtsp_read_loop(cap: cv2.VideoCapture):
             last_good_frame_time = time.time()
 
             now = time.time()
+
+            if should_enable_push(REMOTE_PUSH_URL) and remote_source_url:
+                if now - last_push_check >= 3.0:
+                    last_push_check = now
+                    try:
+                        remote_relay.ensure_running(remote_source_url, REMOTE_PUSH_URL)
+                    except Exception as push_error:
+                        log.warning(f"Remote push monitor failed: {push_error}")
+
             if now - last_frame_time < frame_interval:
                 continue
             last_frame_time = now
@@ -525,11 +546,14 @@ def capture_loop():
             cap = try_rtsp(camera_ip)
 
             if cap is not None:
+                remote_source_rtsp_url = None
                 if should_enable_push(REMOTE_PUSH_URL):
-                    stream_idx = 0 if state.mode == "rtsp_main" else 1
-                    source_rtsp_url = build_rtsp_url(camera_ip, stream_idx)
+                    stream_idx = 1 if REMOTE_PUSH_STREAM_INDEX == 1 else 0
+                    remote_source_rtsp_url = build_rtsp_url(camera_ip, stream_idx)
                     try:
-                        remote_relay.ensure_running(source_rtsp_url, REMOTE_PUSH_URL)
+                        remote_relay.ensure_running(
+                            remote_source_rtsp_url, REMOTE_PUSH_URL
+                        )
                         log.info(f"Remote push enabled -> {REMOTE_PUSH_URL}")
                     except FileNotFoundError:
                         log.error(
@@ -537,7 +561,7 @@ def capture_loop():
                         )
                     except Exception as push_error:
                         log.warning(f"Remote push start failed: {push_error}")
-                rtsp_read_loop(cap)
+                rtsp_read_loop(cap, remote_source_url=remote_source_rtsp_url)
             else:
                 # 3. Fallback на DVRIP
                 remote_relay.stop()
@@ -1453,7 +1477,9 @@ def main():
     log.info(f"Статус JSON:   http://localhost:{WEB_PORT}/status")
     log.info(f"Тревоги JSON:  http://localhost:{WEB_PORT}/alarms")
     if should_enable_push(REMOTE_PUSH_URL):
-        log.info(f"Remote push:   {REMOTE_PUSH_URL} (ffmpeg={FFMPEG_BIN})")
+        log.info(
+            f"Remote push:   {REMOTE_PUSH_URL} (ffmpeg={FFMPEG_BIN}, codec={REMOTE_PUSH_CODEC}, stream={REMOTE_PUSH_STREAM_INDEX})"
+        )
 
     app.run(host=WEB_HOST, port=WEB_PORT, threaded=True, use_reloader=False)
 

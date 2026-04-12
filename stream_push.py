@@ -19,24 +19,45 @@ def build_ffmpeg_push_command(
     target_url: str,
     transport: str = "tcp",
     ffmpeg_bin: str = "ffmpeg",
+    video_codec: str = "copy",
+    preset: str = "veryfast",
+    tune: str = "zerolatency",
+    fps: int = 0,
+    scale_height: int = 0,
 ) -> list[str]:
     container = _target_container(target_url)
-    return [
+    command = [
         ffmpeg_bin,
         "-nostdin",
         "-rtsp_transport",
         transport,
+        "-fflags",
+        "+genpts",
+        "-use_wallclock_as_timestamps",
+        "1",
         "-i",
         source_rtsp_url,
         "-map",
         "0:v:0",
         "-an",
-        "-c:v",
-        "copy",
-        "-f",
-        container,
-        target_url,
     ]
+
+    if video_codec.strip().lower() == "copy":
+        command.extend(["-c:v", "copy"])
+    else:
+        command.extend(["-c:v", video_codec])
+        if preset:
+            command.extend(["-preset", preset])
+        if tune:
+            command.extend(["-tune", tune])
+        if fps > 0:
+            command.extend(["-r", str(fps)])
+        if scale_height > 0:
+            command.extend(["-vf", f"scale=-2:{scale_height}"])
+        command.extend(["-pix_fmt", "yuv420p", "-g", "48"])
+
+    command.extend(["-f", container, target_url])
+    return command
 
 
 class RemotePushRelay:
@@ -46,11 +67,21 @@ class RemotePushRelay:
         transport: str = "tcp",
         log_to_console: bool = False,
         logger: logging.Logger | None = None,
+        video_codec: str = "copy",
+        preset: str = "veryfast",
+        tune: str = "zerolatency",
+        fps: int = 0,
+        scale_height: int = 0,
     ):
         self.ffmpeg_bin = ffmpeg_bin
         self.transport = transport
         self.log_to_console = log_to_console
         self.logger = logger
+        self.video_codec = video_codec
+        self.preset = preset
+        self.tune = tune
+        self.fps = fps
+        self.scale_height = scale_height
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._source_url: str | None = None
@@ -77,6 +108,11 @@ class RemotePushRelay:
                 target_url=target_url,
                 transport=self.transport,
                 ffmpeg_bin=self.ffmpeg_bin,
+                video_codec=self.video_codec,
+                preset=self.preset,
+                tune=self.tune,
+                fps=self.fps,
+                scale_height=self.scale_height,
             )
             self._process = subprocess.Popen(
                 command,

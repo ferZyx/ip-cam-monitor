@@ -31,6 +31,29 @@ class StreamPushTests(unittest.TestCase):
         self.assertIn("flv", command)
         self.assertEqual(command[-1], "http://example.com/live/cam1.flv")
 
+    def test_build_ffmpeg_push_command_transcode_h264(self):
+        command = build_ffmpeg_push_command(
+            source_rtsp_url="rtsp://cam/main",
+            target_url="rtmp://example.com/live/cam1",
+            transport="tcp",
+            video_codec="libx264",
+            preset="veryfast",
+            tune="zerolatency",
+            fps=12,
+            scale_height=720,
+        )
+
+        self.assertIn("-c:v", command)
+        self.assertIn("libx264", command)
+        self.assertIn("-preset", command)
+        self.assertIn("veryfast", command)
+        self.assertIn("-tune", command)
+        self.assertIn("zerolatency", command)
+        self.assertIn("-r", command)
+        self.assertIn("12", command)
+        self.assertIn("-vf", command)
+        self.assertIn("scale=-2:720", command)
+
     def test_should_enable_push(self):
         self.assertFalse(should_enable_push(""))
         self.assertFalse(should_enable_push("   "))
