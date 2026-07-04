@@ -1,7 +1,6 @@
 # Stream Viewer
 
-Локальный веб-сервер для просмотра камеры Xiongmai (RTSP) и получения тревог (DVRIP),
-включая извлечение "фото тревоги" из архивного motion-ролика.
+Локальный веб-сервер для просмотра камеры Xiongmai (RTSP) в браузере.
 
 ## Быстрый старт (Windows)
 
@@ -40,6 +39,16 @@ Telegram (опционально):
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 
+Yellow-box Telegram alerts (опционально):
+
+- `YELLOW_BOX_ALERT_ENABLED` (`0` по умолчанию, поставь `1` для включения)
+- `YELLOW_BOX_CHECK_INTERVAL_SEC` (`1` по умолчанию, как часто проверять последний кадр)
+- `YELLOW_BOX_ALERT_MIN_INTERVAL_SEC` (`3` по умолчанию, минимальная пауза между постановкой тревог в очередь)
+- `YELLOW_BOX_MIN_CONFIDENCE` (`0.5` по умолчанию)
+- `YELLOW_BOX_DETECTION_MAX_WIDTH` (`640` по умолчанию, уменьшение кадра перед детекцией для экономии CPU)
+- `YELLOW_BOX_TELEGRAM_RATE_PER_MINUTE` (`20` по умолчанию, лимит отправки Telegram)
+- `YELLOW_BOX_TELEGRAM_QUEUE_SIZE` (`20` по умолчанию, bounded-очередь без Redis)
+
 Remote push (опционально, для просмотра вне дома):
 
 - `REMOTE_PUSH_URL` (пример: `rtmp://SERVER_IP/live/cam1`)
@@ -56,10 +65,11 @@ Remote push (опционально, для просмотра вне дома):
 Если `REMOTE_PUSH_URL` задан, сервер поднимает фоновый `ffmpeg` и пушит RTSP камеры на внешний сервер.
 Логи ffmpeg будут видны прямо в окне, где запущен `start.bat` / `py server.py`.
 
+Если `YELLOW_BOX_ALERT_ENABLED=1`, сервер раз в секунду проверяет последний кадр из памяти через `yellow_box_detector.py` и при найденной жёлтой рамке ставит JPEG в локальную Telegram-очередь. Очередь отправляет не чаще `YELLOW_BOX_TELEGRAM_RATE_PER_MINUTE`, поэтому capture loop и Flask не ждут Telegram API.
+
 ## Приватность
 
 - Файл `stream_viewer/.env` игнорируется git.
-- Папка `stream_viewer/alarm_photos/` игнорируется git.
 
 ## Experiments / Research
 

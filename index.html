@@ -269,127 +269,6 @@
         color: var(--yellow);
       }
 
-      /* ─── Alarm panel ─────────────────────── */
-      .alarm-panel {
-        max-height: 0;
-        overflow: hidden;
-        transition: max-height 0.3s;
-        background: var(--surface);
-        border-top: 1px solid var(--border);
-      }
-      .alarm-panel.open {
-        max-height: 400px;
-      }
-
-      .alarm-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 20px;
-        border-bottom: 1px solid var(--border);
-        font-size: 13px;
-      }
-      .alarm-header .alarm-badge {
-        background: var(--red);
-        color: #fff;
-        padding: 2px 8px;
-        border-radius: 10px;
-        font-size: 11px;
-        font-weight: 600;
-      }
-
-      .alarm-list {
-        padding: 0;
-        margin: 0;
-        list-style: none;
-        overflow-y: auto;
-        max-height: 350px;
-      }
-
-      .alarm-item {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 8px 20px;
-        border-bottom: 1px solid var(--border);
-        font-size: 13px;
-        cursor: pointer;
-        transition: background 0.15s;
-      }
-      .alarm-item:hover {
-        background: rgba(88, 166, 255, 0.08);
-      }
-
-      .alarm-thumb {
-        width: 80px;
-        height: 60px;
-        border-radius: 4px;
-        object-fit: cover;
-        background: #000;
-        border: 1px solid var(--border);
-        flex-shrink: 0;
-      }
-
-      .alarm-info {
-        flex: 1;
-        min-width: 0;
-      }
-      .alarm-info .alarm-type {
-        font-weight: 600;
-        color: var(--red);
-      }
-      .alarm-info .alarm-time {
-        color: var(--text-dim);
-        font-size: 12px;
-      }
-      .alarm-info .alarm-file {
-        color: var(--text-dim);
-        font-size: 11px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .alarm-empty {
-        padding: 30px 20px;
-        text-align: center;
-        color: var(--text-dim);
-        font-size: 13px;
-      }
-
-      /* ─── Alarm photo modal ──────────────── */
-      .alarm-modal {
-        display: none;
-        position: fixed;
-        inset: 0;
-        z-index: 100;
-        background: rgba(0, 0, 0, 0.85);
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-      }
-      .alarm-modal.show {
-        display: flex;
-      }
-      .alarm-modal img {
-        max-width: 90vw;
-        max-height: 90vh;
-        border-radius: 8px;
-        border: 2px solid var(--border);
-      }
-      .alarm-modal-info {
-        position: absolute;
-        bottom: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: var(--surface);
-        padding: 8px 20px;
-        border-radius: 8px;
-        font-size: 13px;
-        color: var(--text);
-        border: 1px solid var(--border);
-      }
-
       /* ─── Responsive ──────────────────────── */
       @media (max-width: 600px) {
         .header {
@@ -435,14 +314,6 @@
         <button class="btn" onclick="toggleLog()" title="Показать лог">
           📋 Лог
         </button>
-        <button
-          class="btn"
-          onclick="toggleAlarms()"
-          title="Тревоги"
-          id="alarmBtn"
-        >
-          🚨 Тревоги
-        </button>
         <select
           class="btn"
           id="viewMode"
@@ -480,38 +351,11 @@
       <div class="log-content" id="logContent"></div>
     </div>
 
-    <div class="alarm-panel" id="alarmPanel">
-      <div class="alarm-header">
-        <span
-          >🚨 Тревоги <span class="alarm-badge" id="alarmCount">0</span></span
-        >
-        <span
-          id="alarmLastCheck"
-          style="color: var(--text-dim); font-size: 12px"
-          >—</span
-        >
-      </div>
-      <ul class="alarm-list" id="alarmList">
-        <li class="alarm-empty">Загрузка...</li>
-      </ul>
-    </div>
-
-    <!-- Модал для просмотра фото тревоги -->
-    <div class="alarm-modal" id="alarmModal" onclick="closeAlarmModal()">
-      <img id="alarmModalImg" onclick="event.stopPropagation()" />
-      <div
-        class="alarm-modal-info"
-        id="alarmModalInfo"
-        onclick="event.stopPropagation()"
-      ></div>
-    </div>
-
     <div class="footer">
       <span id="footerStatus">Инициализация...</span>
       <span
         >Stream Viewer v1.1 · <a href="/status" target="_blank">/status</a> ·
-        <a href="/snapshot" target="_blank">/snapshot</a> ·
-        <a href="/alarms" target="_blank">/alarms</a></span
+        <a href="/snapshot" target="_blank">/snapshot</a></span
       >
     </div>
 
@@ -549,6 +393,12 @@
       let lastHealthWarnMs = 0;
 
       // ─── Логирование ─────────────────────────────────────────────────────────────
+      /**
+       * Добавляет строку в нижнюю панель лога.
+       * @param {string} msg Сообщение для пользователя.
+       * @param {string} [level=""] Уровень подсветки: error, ok или warn.
+       * @returns {void}
+       */
       function addLog(msg, level = "") {
         const time = new Date().toLocaleTimeString("ru-RU");
         const cls =
@@ -563,7 +413,7 @@
         div.className = cls;
         div.textContent = `[${time}] ${msg}`;
         logContent.appendChild(div);
-        // Ограничиваем
+        // Ограничиваем размер DOM, чтобы долгий просмотр не раздувал страницу.
         while (logContent.children.length > MAX_LOG) {
           logContent.removeChild(logContent.firstChild);
         }
@@ -571,6 +421,11 @@
       }
 
       // ─── Статус ──────────────────────────────────────────────────────────────────
+      /**
+       * Форматирует аптайм сервера для компактного отображения.
+       * @param {number} seconds Аптайм в секундах.
+       * @returns {string} Строка в формате HH:MM:SS.
+       */
       function formatUptime(seconds) {
         if (!seconds) return "—";
         const h = Math.floor(seconds / 3600);
@@ -579,6 +434,10 @@
         return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
       }
 
+      /**
+       * Запрашивает статус backend-а и синхронизирует UI с состоянием потока.
+       * @returns {Promise<void>}
+       */
       async function pollStatus() {
         try {
           const resp = await fetch("/status", {
@@ -687,6 +546,11 @@
         }
       }
 
+      /**
+       * Показывает или скрывает оверлей подключения поверх видеопотока.
+       * @param {{status: string, error?: string, camera_ip?: string}} data Статус backend-а.
+       * @returns {void}
+       */
       function updateOverlay(data) {
         // Скрываем оверлей только когда реально есть живой поток
         // (и статус streaming, и картинка подключена, и кадры обновляются)
@@ -734,6 +598,10 @@
       // ─── MJPEG поток ─────────────────────────────────────────────────────────────
       let streamStarting = false;
 
+      /**
+       * Запускает или перезапускает MJPEG-поток в теге img.
+       * @returns {void}
+       */
       function startStream() {
         if (streamStarting) return; // не спамить
         streamStarting = true;
@@ -745,17 +613,27 @@
         streamImg.onload = null;
         streamImg.onerror = null;
 
-        // Даём время на подключение — если за 15 сек кадр не пришёл, переподключаем
-        const loadTimeout = setTimeout(() => {
+        /**
+         * Обрабатывает таймаут первичного подключения MJPEG-потока.
+         * @returns {void}
+         */
+        function handleStreamLoadTimeout() {
           if (!streamConnected) {
             addLog("MJPEG: таймаут загрузки, переподключение...", "warn");
             streamStarting = false;
             streamConnected = false;
             scheduleReconnect();
           }
-        }, 15000);
+        }
 
-        streamImg.onload = function () {
+        // Даём время на подключение — если за 15 сек кадр не пришёл, переподключаем.
+        const loadTimeout = setTimeout(handleStreamLoadTimeout, 15000);
+
+        /**
+         * Обрабатывает успешное подключение MJPEG-картинки.
+         * @returns {void}
+         */
+        streamImg.onload = function handleStreamLoad() {
           clearTimeout(loadTimeout);
           if (!streamConnected) {
             streamConnected = true;
@@ -765,7 +643,11 @@
           }
         };
 
-        streamImg.onerror = function () {
+        /**
+         * Обрабатывает разрыв MJPEG-потока.
+         * @returns {void}
+         */
+        streamImg.onerror = function handleStreamError() {
           clearTimeout(loadTimeout);
           // Не спамим лог если уже были отключены
           if (streamConnected) {
@@ -780,16 +662,30 @@
         streamImg.src = url;
       }
 
+      /**
+       * Планирует отложенное переподключение MJPEG-потока.
+       * @returns {void}
+       */
       function scheduleReconnect() {
         if (reconnectTimer) return;
-        reconnectTimer = setTimeout(() => {
+        /**
+         * Выполняет отложенное переподключение потока.
+         * @returns {void}
+         */
+        function reconnectStream() {
           reconnectTimer = null;
           streamConnected = false;
           startStream();
-        }, STREAM_RECONNECT_MS);
+        }
+
+        reconnectTimer = setTimeout(reconnectStream, STREAM_RECONNECT_MS);
       }
 
       // ─── Кнопки ──────────────────────────────────────────────────────────────────
+      /**
+       * Скачивает текущий кадр с учётом выбранной области камеры.
+       * @returns {void}
+       */
       function takeSnapshot() {
         const a = document.createElement("a");
         a.href = `/snapshot?cam=${encodeURIComponent(currentCamMode)}`;
@@ -798,15 +694,29 @@
         addLog("Снимок сохранён");
       }
 
+      /**
+       * Переключает полноэкранный режим блока с видеопотоком.
+       * @returns {void}
+       */
       function toggleFullscreen() {
         const wrap = document.getElementById("streamWrap");
         if (!document.fullscreenElement) {
-          wrap.requestFullscreen().catch(() => {});
+          /**
+           * Игнорирует отказ браузера на ручной fullscreen-запрос.
+           * @returns {void}
+           */
+          function ignoreFullscreenError() {}
+
+          wrap.requestFullscreen().catch(ignoreFullscreenError);
         } else {
           document.exitFullscreen();
         }
       }
 
+      /**
+       * Проверяет, запрошен ли fullscreen через URL-параметр.
+       * @returns {boolean} true, если параметр fullscreen включён.
+       */
       function wantFullscreenFromUrl() {
         try {
           const params = new URLSearchParams(window.location.search || "");
@@ -817,6 +727,11 @@
         }
       }
 
+      /**
+       * Пытается включить fullscreen и ждёт жест пользователя при блокировке браузером.
+       * @param {string} [reason=""] Причина, которую нужно показать в логе.
+       * @returns {Promise<void>}
+       */
       async function tryEnterFullscreen(reason = "") {
         const wrap = document.getElementById("streamWrap");
         if (!wrap || document.fullscreenElement) return;
@@ -829,23 +744,51 @@
             "Авто fullscreen заблокирован браузером — кликни по странице для полного экрана",
             "warn",
           );
-          const once = () => {
+          /**
+           * Повторяет fullscreen после первого пользовательского жеста.
+           * @returns {void}
+           */
+          function requestFullscreenOnce() {
+            /**
+             * Логирует успешное включение fullscreen после жеста пользователя.
+             * @returns {void}
+             */
+            function logFullscreenEnabled() {
+              addLog("Полный экран включен", "ok");
+            }
+
+            /**
+             * Игнорирует повторный отказ браузера на fullscreen.
+             * @returns {void}
+             */
+            function ignoreFullscreenRetryError() {}
+
             wrap
               .requestFullscreen()
-              .then(() => addLog("Полный экран включен", "ok"))
-              .catch(() => {});
-            window.removeEventListener("click", once);
-            window.removeEventListener("keydown", once);
-          };
-          window.addEventListener("click", once);
-          window.addEventListener("keydown", once);
+              .then(logFullscreenEnabled)
+              .catch(ignoreFullscreenRetryError);
+            window.removeEventListener("click", requestFullscreenOnce);
+            window.removeEventListener("keydown", requestFullscreenOnce);
+          }
+
+          window.addEventListener("click", requestFullscreenOnce);
+          window.addEventListener("keydown", requestFullscreenOnce);
         }
       }
 
+      /**
+       * Открывает или закрывает панель логов.
+       * @returns {void}
+       */
       function toggleLog() {
         logPanel.classList.toggle("open");
       }
       // ─── Режим отображения ────────────────────────────────────────────────────
+      /**
+       * Меняет CSS-режим масштабирования видеопотока.
+       * @param {string} mode Режим отображения.
+       * @returns {void}
+       */
       function setViewMode(mode) {
         const wrap = document.getElementById("streamWrap");
         wrap.className =
@@ -864,6 +807,11 @@
         );
       }
 
+      /**
+       * Меняет область кадра и переподключает поток с новым параметром.
+       * @param {string} mode Режим области кадра: full, top или bottom.
+       * @returns {void}
+       */
       function setCamMode(mode) {
         currentCamMode = mode || "full";
         localStorage.setItem("camMode", currentCamMode);
@@ -885,7 +833,10 @@
         );
       }
 
-      // Восстановить сохранённый режим
+      /**
+       * Восстанавливает сохранённые настройки отображения из localStorage.
+       * @returns {void}
+       */
       (function () {
         const saved = localStorage.getItem("viewMode");
         if (saved) {
@@ -899,90 +850,6 @@
           currentCamMode = savedCam;
         }
       })();
-      // ─── Тревоги ────────────────────────────────────────────────────────────────
-      const alarmPanel = document.getElementById("alarmPanel");
-      const alarmList = document.getElementById("alarmList");
-      const alarmCount = document.getElementById("alarmCount");
-      const alarmLastCheck = document.getElementById("alarmLastCheck");
-      const alarmModal = document.getElementById("alarmModal");
-      const alarmModalImg = document.getElementById("alarmModalImg");
-      const alarmModalInfo = document.getElementById("alarmModalInfo");
-      let lastAlarmCount = 0;
-
-      function toggleAlarms() {
-        alarmPanel.classList.toggle("open");
-        if (alarmPanel.classList.contains("open")) {
-          loadAlarms();
-        }
-      }
-
-      async function loadAlarms() {
-        try {
-          const resp = await fetch("/alarms?limit=50", {
-            signal: AbortSignal.timeout(5000),
-          });
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const data = await resp.json();
-
-          alarmCount.textContent = data.total;
-          alarmLastCheck.textContent = data.last_check
-            ? `Проверка: ${new Date(data.last_check).toLocaleTimeString("ru-RU")}`
-            : "—";
-
-          if (data.alarms.length === 0) {
-            alarmList.innerHTML =
-              '<li class="alarm-empty">Тревог не обнаружено</li>';
-            return;
-          }
-
-          // Если появились новые тревоги — уведомляем в лог
-          if (data.total > lastAlarmCount && lastAlarmCount > 0) {
-            addLog(`Новых тревог: ${data.total - lastAlarmCount}`, "warn");
-          }
-          lastAlarmCount = data.total;
-
-          alarmList.innerHTML = data.alarms
-            .map((a) => {
-              const thumbUrl = `/alarm_photo?file=${encodeURIComponent(a.file)}&start=${encodeURIComponent(a.time)}&end=${encodeURIComponent(a.end_time || a.time)}`;
-              const hasPhoto = a.photo_file ? "📷" : "";
-              return `<li class="alarm-item" onclick="showAlarmPhoto('${thumbUrl.replace(/'/g, "\\'")}', '${a.type} — ${a.time}')">
-              <img class="alarm-thumb" src="${thumbUrl}" loading="lazy" onerror="this.style.display='none'" />
-              <div class="alarm-info">
-                <div class="alarm-type">🚨 ${a.type} ${hasPhoto}</div>
-                <div class="alarm-time">🕐 ${a.time}${a.end_time && a.end_time !== a.time ? " → " + a.end_time : ""}</div>
-              </div>
-            </li>`;
-            })
-            .join("");
-        } catch (e) {
-          alarmList.innerHTML =
-            '<li class="alarm-empty">Ошибка загрузки тревог</li>';
-        }
-      }
-
-      function showAlarmPhoto(url, info) {
-        event && event.stopPropagation();
-        alarmModalImg.src = url;
-        alarmModalInfo.textContent = info;
-        alarmModal.classList.add("show");
-      }
-
-      function closeAlarmModal() {
-        alarmModal.classList.remove("show");
-        // НЕ сбрасываем src="" — это генерирует запрос на "/"
-        // и может сломать MJPEG поток
-        alarmModalImg.removeAttribute("src");
-        // Безопасно восстанавливаем поток если он пропал
-        if (!streamConnected && !streamStarting) {
-          startStream();
-        }
-      }
-
-      // Обновляем тревоги каждые 30 сек если панель открыта
-      setInterval(() => {
-        if (alarmPanel.classList.contains("open")) loadAlarms();
-      }, 30000);
-
       // ─── Запуск ──────────────────────────────────────────────────────────────────
       addLog("Stream Viewer запущен");
       pollStatus();
@@ -990,19 +857,33 @@
 
       // Авто fullscreen по параметру URL (?fullscreen=true)
       if (wantFullscreenFromUrl()) {
-        // не мешаем первоначальной загрузке DOM
-        setTimeout(() => tryEnterFullscreen("URL параметр"), 500);
+        /**
+         * Включает fullscreen после первичной отрисовки страницы.
+         * @returns {void}
+         */
+        function enterFullscreenFromUrl() {
+          tryEnterFullscreen("URL параметр");
+        }
+
+        // Не мешаем первоначальной загрузке DOM.
+        setTimeout(enterFullscreenFromUrl, 500);
       }
 
-      // Переподключение при возврате на вкладку
-      document.addEventListener("visibilitychange", () => {
+      /**
+       * Проверяет поток при возврате пользователя на вкладку.
+       * @returns {void}
+       */
+      function handleVisibilityChange() {
         if (!document.hidden) {
           addLog("Вкладка активна, проверка потока...");
           pollStatus();
           if (!streamConnected && !streamStarting && !reconnectTimer)
             startStream();
         }
-      });
+      }
+
+      // Переподключение при возврате на вкладку.
+      document.addEventListener("visibilitychange", handleVisibilityChange);
     </script>
   </body>
 </html>

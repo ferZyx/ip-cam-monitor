@@ -13,9 +13,11 @@ def send_telegram_payload(
     ca_bundle: str = "",
     as_document: bool = False,
 ) -> None:
+    """Отправляет текст и необязательный JPEG в Telegram Bot API."""
     if not bot_token or not chat_id:
         return
 
+    # Настраиваем SSL-контекст один раз перед выбором метода Telegram API.
     ssl_context = None
     if ssl_verify:
         if ca_bundle:
@@ -30,6 +32,7 @@ def send_telegram_payload(
         field_name = "document" if as_document else "photo"
         url = f"https://api.telegram.org/bot{bot_token}/{method}"
         boundary = "----FormBoundary"
+        # Telegram принимает фото только через multipart/form-data.
         body = (
             (
                 f"--{boundary}\r\n"
@@ -38,7 +41,7 @@ def send_telegram_payload(
                 f'Content-Disposition: form-data; name="caption"\r\n'
                 f"Content-Type: text/plain; charset=utf-8\r\n\r\n{text}\r\n"
                 f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="{field_name}"; filename="alarm.jpg"\r\n'
+                f'Content-Disposition: form-data; name="{field_name}"; filename="photo.jpg"\r\n'
                 f"Content-Type: image/jpeg\r\n\r\n"
             ).encode()
             + photo_bytes

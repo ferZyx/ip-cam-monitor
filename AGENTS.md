@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is a small Python camera-monitoring app. Runtime modules live at the repository root: `server.py` hosts the Flask/MJPEG server, `stream_push.py` manages optional ffmpeg relay, `alarm_logic.py` contains shared alarm selection logic, and `telegram_sender.py` handles Telegram delivery. The browser UI is `index.html`. Tests are root-level files named `test_*.py`. Research and one-off diagnostics belong in `experiments/`; write generated experiment output to `experiments/output/`, which is ignored by git.
+This repository is a small Python camera-monitoring app. Runtime modules live at the repository root: `server.py` hosts the Flask/MJPEG server, `stream_push.py` manages optional ffmpeg relay, and `telegram_sender.py` handles Telegram delivery. The browser UI is `index.html`. Tests are root-level files named `test_*.py`. Research and one-off diagnostics belong in `experiments/`; write generated experiment output to `experiments/output/`, which is ignored by git.
 
 ## Build, Test, and Development Commands
 
@@ -42,8 +42,8 @@ Use the standard `unittest` framework. Add tests near existing root-level test f
 
 ## Commit & Pull Request Guidelines
 
-Recent commits use imperative English summaries, such as `Add ...`, `Update ...`, and `Refactor ...`. Keep commit subjects concise and describe user-visible behavior or the main code change. Pull requests should include a short purpose statement, test results, linked issue if available, and screenshots or logs when UI, alarm delivery, or streaming behavior changes.
+Recent commits use imperative English summaries, such as `Add ...`, `Update ...`, and `Refactor ...`. Keep commit subjects concise and describe user-visible behavior or the main code change. Pull requests should include a short purpose statement, test results, linked issue if available, and screenshots or logs when UI, Telegram delivery, or streaming behavior changes.
 
 ## Security & Configuration Tips
 
-Never commit real `.env` values, camera credentials, Telegram tokens, exported alarm photos, or experiment outputs. Keep `.env.example` safe and realistic, with placeholders for sensitive values.
+Never commit real `.env` values, camera credentials, Telegram tokens, exported media, or experiment outputs. Keep `.env.example` safe and realistic, with placeholders for sensitive values.

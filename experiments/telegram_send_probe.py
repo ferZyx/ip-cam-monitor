@@ -18,6 +18,7 @@ from telegram_sender import send_telegram_payload
 
 
 def main() -> int:
+    """Отправляет тестовое Telegram-сообщение из переменных окружения."""
     ap = argparse.ArgumentParser(description="Send one Telegram probe message")
     ap.add_argument("--text", default="Probe from stream_viewer experiments")
     ap.add_argument("--photo", default="", help="Optional path to JPEG")

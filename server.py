@@ -18,55 +18,22 @@ Stream Viewer — Python-бэкенд для 24/7 просмотра IP-каме
   Открыть http://localhost:5050
 """
 
-import io
 import json
 import logging
 import os
-import re
 import socket
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
 
 try:
-    try:
-        from dotenv import load_dotenv
+    from dotenv import load_dotenv
 
-        load_dotenv()
-    except Exception:
-        # .env support is optional; environment variables still work.
-        pass
-
-    # When running as `py server.py` inside `stream_viewer/`
-    from alarm_photo_extractor import (
-        download_motion_file_h264,
-        extract_best_jpeg_from_motion_h264,
-    )
-except ModuleNotFoundError:
-    # When running as `py -m stream_viewer.server` or importing as a package
-    from stream_viewer.alarm_photo_extractor import (  # type: ignore
-        download_motion_file_h264,
-        extract_best_jpeg_from_motion_h264,
-    )
-
-try:
-    # When running as `py server.py` inside `stream_viewer/`
-    from alarm_hybrid_extractor import extract_alarm_photo_hybrid
-except ModuleNotFoundError:
-    from stream_viewer.alarm_hybrid_extractor import (  # type: ignore
-        extract_alarm_photo_hybrid,
-    )
-
-try:
-    # When running as `py server.py` inside `stream_viewer/`
-    from alarm_logic import alarm_row_dt, choose_best_alarm_events
-except ModuleNotFoundError:
-    from stream_viewer.alarm_logic import (  # type: ignore
-        alarm_row_dt,
-        choose_best_alarm_events,
-    )
+    load_dotenv()
+except Exception:
+    # .env опционален: сервер должен работать и с системными переменными окружения.
+    pass
 
 try:
     # When running as `py server.py` inside `stream_viewer/`
@@ -81,6 +48,20 @@ except ModuleNotFoundError:
     from stream_viewer.stream_push import (  # type: ignore
         RemotePushRelay,
         should_enable_push,
+    )
+
+try:
+    # When running as `py server.py` inside `stream_viewer/`
+    from yellow_box_alerts import (
+        FrameSnapshot,
+        RateLimitedTelegramQueue,
+        YellowBoxFrameMonitor,
+    )
+except ModuleNotFoundError:
+    from stream_viewer.yellow_box_alerts import (  # type: ignore
+        FrameSnapshot,
+        RateLimitedTelegramQueue,
+        YellowBoxFrameMonitor,
     )
 
 try:
@@ -108,13 +89,23 @@ except ImportError:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Читает целочисленную переменную окружения с безопасным значением по умолчанию."""
     try:
         return int(os.getenv(name, str(default)))
     except Exception:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    """Читает дробную переменную окружения с безопасным значением по умолчанию."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
+    """Читает булеву переменную окружения в человекочитаемых форматах."""
     v = os.getenv(name)
     if v is None:
         return default
@@ -141,12 +132,21 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_SSL_VERIFY = _env_bool("TELEGRAM_SSL_VERIFY", default=True)
 TELEGRAM_CA_BUNDLE = os.getenv("TELEGRAM_CA_BUNDLE", "").strip()
-ALARM_POLL_INTERVAL = _env_int("ALARM_POLL_INTERVAL", 300)  # backup
-ALARM_HISTORY_MAX = 200  # Макс тревог в памяти
-ALARM_PHOTOS_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "alarm_photos"
+
+# Yellow-box Telegram alerts (optional)
+YELLOW_BOX_ALERT_ENABLED = _env_bool("YELLOW_BOX_ALERT_ENABLED", default=False)
+YELLOW_BOX_CHECK_INTERVAL_SEC = _env_float("YELLOW_BOX_CHECK_INTERVAL_SEC", 1.0)
+YELLOW_BOX_ALERT_MIN_INTERVAL_SEC = _env_float(
+    "YELLOW_BOX_ALERT_MIN_INTERVAL_SEC",
+    3.0,
 )
-ALARM_DEBUG_DUMP = _env_bool("ALARM_DEBUG_DUMP", default=False)
+YELLOW_BOX_MIN_CONFIDENCE = _env_float("YELLOW_BOX_MIN_CONFIDENCE", 0.5)
+YELLOW_BOX_DETECTION_MAX_WIDTH = _env_int("YELLOW_BOX_DETECTION_MAX_WIDTH", 640)
+YELLOW_BOX_TELEGRAM_RATE_PER_MINUTE = _env_int(
+    "YELLOW_BOX_TELEGRAM_RATE_PER_MINUTE",
+    20,
+)
+YELLOW_BOX_TELEGRAM_QUEUE_SIZE = _env_int("YELLOW_BOX_TELEGRAM_QUEUE_SIZE", 20)
 
 # RTSP stability
 RTSP_NO_FRAME_TIMEOUT_SEC = _env_int("RTSP_NO_FRAME_TIMEOUT_SEC", 15)
@@ -165,17 +165,6 @@ REMOTE_PUSH_FPS = _env_int("REMOTE_PUSH_FPS", 12)
 REMOTE_PUSH_SCALE_HEIGHT = _env_int("REMOTE_PUSH_SCALE_HEIGHT", 720)
 REMOTE_PUSH_STREAM_INDEX = _env_int("REMOTE_PUSH_STREAM_INDEX", 1)
 
-# Alarm -> Telegram behavior
-ALARM_TG_REQUIRE_PHOTO = _env_bool("ALARM_TG_REQUIRE_PHOTO", default=True)
-ALARM_EXTRACT_WORKERS = _env_int("ALARM_EXTRACT_WORKERS", 1)
-ALARM_EVENT_GROUP_SEC = _env_int("ALARM_EVENT_GROUP_SEC", 30)
-ALARM_BOOTSTRAP_HOURS = _env_int("ALARM_BOOTSTRAP_HOURS", 24)
-ALARM_POLL_LOG_EVERY_TICK = _env_bool("ALARM_POLL_LOG_EVERY_TICK", default=True)
-ALARM_HISTORY_USE_EVENT_CLUSTER = _env_bool(
-    "ALARM_HISTORY_USE_EVENT_CLUSTER", default=False
-)
-ALARM_POLL_LOOKBACK_SEC = _env_int("ALARM_POLL_LOOKBACK_SEC", 3600)
-ALARM_NOTIFY_GROUP_SEC = _env_int("ALARM_NOTIFY_GROUP_SEC", 60)
 QUIET_HTTP_ACCESS_LOGS = _env_bool("QUIET_HTTP_ACCESS_LOGS", default=True)
 
 
@@ -209,6 +198,7 @@ class CameraState:
     """Потокобезопасное состояние камеры."""
 
     def __init__(self):
+        """Создаёт пустое состояние камеры и счётчики потока."""
         self.lock = threading.Lock()
         self.frame: bytes | None = None  # JPEG bytes
         self.frame_bgr = None  # last BGR frame (optional)
@@ -224,6 +214,7 @@ class CameraState:
         self.clients: int = 0
 
     def set_frame(self, jpeg_bytes: bytes, bgr_frame=None):
+        """Сохраняет последний кадр и будит клиентов MJPEG-потока."""
         with self.lock:
             self.frame = jpeg_bytes
             self.frame_bgr = bgr_frame
@@ -232,14 +223,17 @@ class CameraState:
         self.frame_event.clear()
 
     def get_frame(self) -> bytes | None:
+        """Возвращает последний JPEG-кадр."""
         with self.lock:
             return self.frame
 
     def get_frame_bgr(self):
+        """Возвращает последний BGR-кадр, если он доступен."""
         with self.lock:
             return self.frame_bgr
 
     def set_status(self, status: str, error: str = ""):
+        """Обновляет статус камеры и время аптайма трансляции."""
         self.status = status
         self.error = error
         if status == "streaming" and self.uptime_start is None:
@@ -248,6 +242,7 @@ class CameraState:
             self.uptime_start = None
 
     def to_dict(self) -> dict:
+        """Возвращает публичный JSON-словарь состояния камеры."""
         uptime = 0
         if self.uptime_start:
             uptime = int(time.time() - self.uptime_start)
@@ -326,6 +321,7 @@ def discover_camera() -> str | None:
     state.set_status("scanning")
 
     def scan_ip(ip: str) -> str | None:
+        """Возвращает IP, если на нём открыт DVRIP-порт камеры."""
         return ip if check_port(ip, DVRIP_PORT) else None
 
     ips = [f"{subnet}.{i}" for i in range(1, 255) if f"{subnet}.{i}" != local_ip]
@@ -602,22 +598,7 @@ def capture_loop():
         time.sleep(RECONNECT_DELAY)
 
 
-# ─── Тревоги (DVRIP OPFileQuery) ──────────────────────────────────────────────
-
-alarm_store = {
-    "alarms": [],  # список тревог [{time, end_time, type, file, size, photo_file}, ...]
-    "last_check": None,
-    "lock": threading.Lock(),
-    "known_files": set(),  # уже виденные файлы, чтобы не дублировать
-    "known_event_keys": set(),  # уже виденные события (дедуп по времени)
-    "notified_event_keys": set(),  # события, уже отправленные в TG
-}
-
-# Ограничиваем параллелизм извлечения тревожных фото,
-# иначе камера/CPU легко перегружаются и начинаются провалы.
-alarm_executor = ThreadPoolExecutor(max_workers=max(1, ALARM_EXTRACT_WORKERS))
-
-os.makedirs(ALARM_PHOTOS_DIR, exist_ok=True)
+# ─── Telegram ─────────────────────────────────────────────────────────────────
 
 
 def send_telegram(text: str, photo_bytes: bytes | None = None):
@@ -639,512 +620,69 @@ def send_telegram(text: str, photo_bytes: bytes | None = None):
         log.warning(f"Telegram ошибка: {e}")
 
 
-def query_alarms(cam, begin: str, end: str, file_type: str = "jpg") -> list:
-    """Запрос тревог через DVRIP OPFileQuery."""
-    query = {
-        "Name": "OPFileQuery",
-        "OPFileQuery": {
-            "BeginTime": begin,
-            "EndTime": end,
-            "Channel": 0,
-            "DriverTypeMask": "0x0000FFFF",
-            "Event": "M" if file_type == "h264" else "*",
-            "Type": file_type,
-            "StreamType": "Main",
-        },
-    }
-    try:
-        res = cam.send(1440, query)
-        if not res:
-            return []
-        data = res.get("OPFileQuery", res)
-        if isinstance(data, dict) and "FileList" in data:
-            data = data["FileList"]
-        if isinstance(data, list):
-            return data
-        return []
-    except Exception as e:
-        log.warning(f"OPFileQuery ошибка: {e}")
-        return []
+# ─── Yellow-box Telegram alerts ───────────────────────────────────────────────
 
 
-def parse_alarm_event(code: str) -> str:
-    """Расшифровка кода тревоги."""
-    mapping = {
-        "M": "Движение",
-        "H": "Человек",
-        "V": "Маска камеры",
-        "L": "Потеря видео",
-        "A": "Локальная тревога",
-        "*": "Событие",
-    }
-    return mapping.get(code, code)
-
-
-def capture_alarm_snapshot(cam) -> bytes | None:
-    """Делает OPSNAP снимок через DVRIP. Проверено: 100% надёжно, ~230мс, ~36КБ JPEG."""
-    try:
-        data = cam.snapshot(channel=0)
-        if data and len(data) > 100 and data[:2] == b"\xff\xd8":
-            return bytes(data)
-    except Exception as e:
-        log.warning(f"OPSNAP ошибка: {e}")
-    return None
-
-
-def dvrip_opsnap(ip: str) -> bytes | None:
-    """Fallback: отдельный DVRIP логин и OPSNAP."""
-    if (not HAS_DVRIP) or (DVRIPCam is None):
-        return None
-    cam = None
-    try:
-        cam = DVRIPCam(ip, port=DVRIP_PORT, user=CAMERA_USER, password=CAMERA_PASS)
-        if not cam.login():
+def get_yellow_box_frame_snapshot() -> FrameSnapshot | None:
+    """Возвращает последний кадр камеры для фоновой yellow-box детекции."""
+    with state.lock:
+        if state.frame is None:
             return None
-        return capture_alarm_snapshot(cam)
-    except Exception as e:
-        log.warning(f"OPSNAP fallback error: {e}")
-        return None
-    finally:
-        if cam:
-            try:
-                cam.close()
-            except Exception:
-                pass
+
+        # Берём JPEG, BGR и номер кадра под одним lock, чтобы монитор не смешивал кадры.
+        return FrameSnapshot(
+            frame_count=state.frame_count,
+            jpeg_bytes=state.frame,
+            bgr_frame=state.frame_bgr,
+        )
 
 
-def capture_frame_from_buffer() -> bytes | None:
-    """
-    Берёт текущий кадр из RTSP буфера (уже в памяти).
-    Полноразмерный 2304x2592 JPEG, задержка ~0мс.
-    """
-    frame = state.get_frame()
-    if frame and len(frame) > 100:
-        return frame
-    return None
-
-
-def _parse_dt(s: str) -> datetime | None:
-    try:
-        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return None
-
-
-def _find_closest_motion_file(files: list[dict], target: datetime) -> dict | None:
-    best = None
-    best_delta = None
-    for f in files:
-        bt = _parse_dt(str(f.get("BeginTime", "")))
-        if not bt:
-            continue
-        delta = abs((bt - target).total_seconds())
-        if best is None or (best_delta is not None and delta < best_delta):
-            best = f
-            best_delta = delta
-    return best
-
-
-def _alarm_event_key(row: dict) -> str | None:
-    dt = alarm_row_dt(row)
-    if dt is None:
-        return None
-    gap = max(1, int(ALARM_EVENT_GROUP_SEC))
-    bucket = int(dt.timestamp()) // gap
-    return f"M:{bucket}"
-
-
-def _alarm_notify_key(row: dict) -> str | None:
-    dt = alarm_row_dt(row)
-    if dt is None:
-        return None
-    gap = max(1, int(ALARM_NOTIFY_GROUP_SEC))
-    bucket = int(dt.timestamp()) // gap
-    return f"TG:{bucket}"
-
-
-def _choose_best_alarm_events(
-    jpg_files: list[dict], h264_files: list[dict]
-) -> list[dict]:
-    return choose_best_alarm_events(
-        jpg_files, h264_files, cluster_gap_sec=max(1, int(ALARM_EVENT_GROUP_SEC))
+def should_enable_yellow_box_alerts() -> bool:
+    """Проверяет, можно ли запускать yellow-box Telegram alerts."""
+    return bool(
+        YELLOW_BOX_ALERT_ENABLED
+        and TELEGRAM_BOT_TOKEN
+        and TELEGRAM_CHAT_ID
     )
 
 
-def extract_alarm_photo_from_motion(
-    ip: str, target_dt: datetime, debug: bool = True
-) -> tuple[bytes | None, dict]:
-    """Новый подход: достаём фото из архивного motion-ролика (Event=M, Type=h264).
+def start_yellow_box_alerts():
+    """Запускает очередь Telegram и фоновую yellow-box детекцию, если они включены."""
+    if not YELLOW_BOX_ALERT_ENABLED:
+        return None
 
-    Возвращает (jpeg_bytes|None, meta).
-    """
-    meta: dict = {
-        "ok": False,
-        "reason": "init",
-        "file": None,
-        "begin": None,
-        "end": None,
-        "chosen_frame_index": None,
-    }
-
-    if (not HAS_DVRIP) or (DVRIPCam is None):
-        meta["reason"] = "python-dvr_not_available"
-        return None, meta
-
-    # Иногда запись появляется в файловом индексе с задержкой.
-    for attempt in range(1, 6):
-        cam = None
-        try:
-            cam = DVRIPCam(ip, port=DVRIP_PORT, user=CAMERA_USER, password=CAMERA_PASS)
-            if not cam.login():
-                meta["reason"] = "dvrip_login_failed"
-                return None, meta
-
-            begin = (target_dt - timedelta(seconds=90)).strftime("%Y-%m-%d %H:%M:%S")
-            end = (target_dt + timedelta(seconds=15)).strftime("%Y-%m-%d %H:%M:%S")
-            files = query_alarms(cam, begin, end, "h264")
-            candidate = _find_closest_motion_file(files, target_dt)
-            if not candidate:
-                meta["reason"] = f"no_motion_file_found_attempt_{attempt}"
-                time.sleep(1.5)
-                continue
-
-            fname = str(candidate.get("FileName", ""))
-            meta["file"] = fname
-            meta["begin"] = candidate.get("BeginTime")
-            meta["end"] = candidate.get("EndTime")
-
-            alarm_id = target_dt.strftime("%Y-%m-%d_%H_%M_%S")
-            debug_dir = None
-            if debug:
-                debug_dir = os.path.join(ALARM_PHOTOS_DIR, f"debug_{alarm_id}")
-
-            raw_1426 = download_motion_file_h264(
-                ip=ip,
-                port=DVRIP_PORT,
-                username=CAMERA_USER,
-                password=CAMERA_PASS,
-                filename=fname,
-                begin_time=str(candidate.get("BeginTime", "")),
-                end_time=str(candidate.get("EndTime", "")),
-                debug_dir=debug_dir,
-            )
-            res = extract_best_jpeg_from_motion_h264(raw_1426, debug_dir=debug_dir)
-            meta["chosen_frame_index"] = res.chosen_frame_index
-            meta["reason"] = res.reason
-            meta["ok"] = bool(res.ok)
-            return res.jpeg_bytes, meta
-        except Exception as e:
-            meta["reason"] = f"exception: {e}"
-            time.sleep(1.0)
-        finally:
-            if cam:
-                try:
-                    cam.close()
-                except Exception:
-                    pass
-
-    return None, meta
-
-
-def extract_alarm_photo_from_motion_file(
-    ip: str, file_entry: dict, debug: bool = False
-) -> tuple[bytes | None, dict]:
-    """Извлекает фото тревоги напрямую из motion-файла (OPFileQuery Event=M, Type=h264)."""
-    meta: dict = {
-        "ok": False,
-        "reason": "init",
-        "file": file_entry.get("FileName"),
-        "begin": file_entry.get("BeginTime"),
-        "end": file_entry.get("EndTime"),
-        "chosen_frame_index": None,
-    }
-    if (not HAS_DVRIP) or (DVRIPCam is None):
-        meta["reason"] = "python-dvr_not_available"
-        return None, meta
-
-    fname = str(file_entry.get("FileName", ""))
-    begin_time = str(file_entry.get("BeginTime", ""))
-    end_time = str(file_entry.get("EndTime", ""))
-    if not fname or not begin_time or not end_time:
-        meta["reason"] = "missing_fields"
-        return None, meta
-
-    debug_dir = None
-    if debug:
-        alarm_id = re.sub(r"[^0-9A-Za-z_-]", "_", begin_time)
-        debug_dir = os.path.join(ALARM_PHOTOS_DIR, f"debug_hist_{alarm_id}")
-
-    try:
-        raw_1426 = download_motion_file_h264(
-            ip=ip,
-            port=DVRIP_PORT,
-            username=CAMERA_USER,
-            password=CAMERA_PASS,
-            filename=fname,
-            begin_time=begin_time,
-            end_time=end_time,
-            debug_dir=debug_dir,
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.warning(
+            "Yellow box alerts enabled, but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are empty"
         )
-        res = extract_best_jpeg_from_motion_h264(raw_1426, debug_dir=debug_dir)
-        meta["chosen_frame_index"] = res.chosen_frame_index
-        meta["reason"] = res.reason
-        meta["ok"] = bool(res.ok)
-        return res.jpeg_bytes, meta
-    except Exception as e:
-        meta["reason"] = f"exception: {e}"
-        return None, meta
+        return None
 
+    telegram_queue = RateLimitedTelegramQueue(
+        send_func=send_telegram,
+        rate_per_minute=YELLOW_BOX_TELEGRAM_RATE_PER_MINUTE,
+        max_queue_size=YELLOW_BOX_TELEGRAM_QUEUE_SIZE,
+        logger=log,
+    )
+    telegram_queue.start()
 
-def save_alarm_photo(alarm_id: str, jpeg_bytes: bytes) -> str:
-    """Сохраняет JPEG тревоги на диск. Возвращает имя файла."""
-    safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", alarm_id)
-    filename = f"{safe_id}.jpg"
-    filepath = os.path.join(ALARM_PHOTOS_DIR, filename)
-    with open(filepath, "wb") as f:
-        f.write(jpeg_bytes)
-    return filename
+    monitor = YellowBoxFrameMonitor(
+        frame_provider=get_yellow_box_frame_snapshot,
+        alert_queue=telegram_queue.enqueue_alert,
+        check_interval_sec=YELLOW_BOX_CHECK_INTERVAL_SEC,
+        alert_min_interval_sec=YELLOW_BOX_ALERT_MIN_INTERVAL_SEC,
+        min_confidence=YELLOW_BOX_MIN_CONFIDENCE,
+        max_detection_width=YELLOW_BOX_DETECTION_MAX_WIDTH,
+        logger=log,
+    )
+    monitor.start()
 
-
-def get_alarm_photo_bytes(alarm_entry: dict) -> bytes | None:
-    """Получает JPEG тревоги: с диска или текущий кадр стрима."""
-    # 1. Сохранённое фото на диске
-    photo_file = alarm_entry.get("photo_file")
-    if photo_file:
-        path = os.path.join(ALARM_PHOTOS_DIR, photo_file)
-        if os.path.isfile(path) and os.path.getsize(path) > 100:
-            with open(path, "rb") as f:
-                return f.read()
-
-    # 2. Текущий кадр стрима (fallback)
-    return state.get_frame()
-
-
-def alarm_history_poll_loop():
-    """
-    Периодически опрашивает OPFileQuery для сбора новых тревог.
-    Новые тревоги отправляет в Telegram.
-    """
-    if (not HAS_DVRIP) or (DVRIPCam is None):
-        return
-
-    log.info(f"Backup: история тревог каждые {ALARM_POLL_INTERVAL}с")
-
-    bootstrapped = False
-
-    while True:
-        if not state.camera_ip:
-            time.sleep(10)
-            continue
-
-        cam = None
-        try:
-            cam = DVRIPCam(
-                state.camera_ip, port=DVRIP_PORT, user=CAMERA_USER, password=CAMERA_PASS
-            )
-            if not cam.login():
-                time.sleep(ALARM_POLL_INTERVAL)
-                continue
-
-            now = datetime.now()
-
-            if not bootstrapped:
-                begin_boot = (
-                    now - timedelta(hours=max(1, ALARM_BOOTSTRAP_HOURS))
-                ).strftime("%Y-%m-%d %H:%M:%S")
-                end_boot = now.strftime("%Y-%m-%d %H:%M:%S")
-                jpg_boot = query_alarms(cam, begin_boot, end_boot, "jpg")
-                h264_boot = query_alarms(cam, begin_boot, end_boot, "h264")
-                if ALARM_HISTORY_USE_EVENT_CLUSTER:
-                    seed_rows = _choose_best_alarm_events(jpg_boot, h264_boot)
-                else:
-                    seed_rows = [dict(r, __type="jpg") for r in jpg_boot]
-                    seed_rows.sort(
-                        key=lambda x: alarm_row_dt(x) or datetime.min, reverse=True
-                    )
-
-                with alarm_store["lock"]:
-                    for r in seed_rows:
-                        key = _alarm_event_key(r)
-                        fname = str(r.get("FileName", ""))
-                        if key:
-                            alarm_store["known_event_keys"].add(key)
-                        if fname:
-                            alarm_store["known_files"].add(fname)
-
-                        alarm_store["alarms"] = (
-                            [
-                                {
-                                    "time": r.get("BeginTime", ""),
-                                    "end_time": r.get("EndTime", ""),
-                                    "type": parse_alarm_event("M"),
-                                    "type_code": "M",
-                                    "file": fname,
-                                    "size": 0,
-                                    "photo_file": None,
-                                    "source": "bootstrap",
-                                    "file_type": str(r.get("__type", "")),
-                                }
-                            ]
-                            + alarm_store["alarms"]
-                        )[:ALARM_HISTORY_MAX]
-
-                    alarm_store["last_check"] = now.isoformat()
-
-                bootstrapped = True
-                log.info(
-                    "History bootstrap: loaded=%d new=%d raw(jpg=%d,h264=%d) (без TG)",
-                    len(seed_rows),
-                    len(seed_rows),
-                    len(jpg_boot),
-                    len(h264_boot),
-                )
-                time.sleep(ALARM_POLL_INTERVAL)
-                continue
-
-            begin_dt = now - timedelta(seconds=max(60, ALARM_POLL_LOOKBACK_SEC))
-
-            begin = begin_dt.strftime("%Y-%m-%d %H:%M:%S")
-            end = now.strftime("%Y-%m-%d %H:%M:%S")
-
-            jpg_files = query_alarms(cam, begin, end, "jpg")
-            h264_files = query_alarms(cam, begin, end, "h264")
-            if ALARM_HISTORY_USE_EVENT_CLUSTER:
-                files = _choose_best_alarm_events(jpg_files, h264_files)
-            else:
-                files = [dict(r, __type="jpg") for r in jpg_files]
-                files.sort(key=lambda x: alarm_row_dt(x) or datetime.min, reverse=True)
-
-            # Новые события, которых еще не видели (по event key)
-            new_items = []
-            for f in files:
-                event_key = _alarm_event_key(f)
-                fname = str(f.get("FileName", ""))
-                if fname and fname in alarm_store["known_files"]:
-                    continue
-                if (
-                    (not fname)
-                    and event_key
-                    and event_key in alarm_store["known_event_keys"]
-                ):
-                    continue
-                new_items.append(f)
-
-            if ALARM_POLL_LOG_EVERY_TICK:
-                log.info(
-                    "History poll: window=%s..%s loaded=%d new=%d raw(jpg=%d,h264=%d)",
-                    begin,
-                    end,
-                    len(files),
-                    len(new_items),
-                    len(jpg_files),
-                    len(h264_files),
-                )
-
-            new_count = 0
-            tg_count = 0
-            for f in new_items:
-                fname = f.get("FileName", "")
-                file_type = str(f.get("__type", ""))
-                event_key = _alarm_event_key(f)
-                notify_key = _alarm_notify_key(f)
-
-                event_code = "M"
-                alarm_entry = {
-                    "time": f.get("BeginTime", ""),
-                    "end_time": f.get("EndTime", ""),
-                    "type": parse_alarm_event(event_code),
-                    "type_code": event_code,
-                    "file": fname,
-                    "size": 0,
-                    "photo_file": None,
-                    "source": "history",
-                    "file_type": file_type,
-                }
-
-                alarm_store["known_files"].add(fname)
-                if event_key:
-                    alarm_store["known_event_keys"].add(event_key)
-                with alarm_store["lock"]:
-                    alarm_store["alarms"] = ([alarm_entry] + alarm_store["alarms"])[
-                        :ALARM_HISTORY_MAX
-                    ]
-                new_count += 1
-
-                should_notify = True
-                if notify_key and notify_key in alarm_store["notified_event_keys"]:
-                    should_notify = False
-
-                if should_notify and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-
-                    def job_hist(entry=f, type_name=alarm_entry["type"]):
-                        dt_txt = str(entry.get("BeginTime", ""))
-                        bt = _parse_dt(dt_txt) if dt_txt else None
-                        if bt is not None:
-                            jpeg, meta = extract_alarm_photo_hybrid(
-                                state.camera_ip or KNOWN_IP,
-                                bt,
-                                dvrip_port=DVRIP_PORT,
-                                username=CAMERA_USER,
-                                password=CAMERA_PASS,
-                                debug_dir_root=ALARM_PHOTOS_DIR,
-                                debug=ALARM_DEBUG_DUMP,
-                                timeout_sec=60,
-                                download_retries=2,
-                                bottom_white_threshold=0.25,
-                            )
-                        else:
-                            jpeg, meta = extract_alarm_photo_from_motion_file(
-                                state.camera_ip or KNOWN_IP,
-                                entry,
-                                debug=ALARM_DEBUG_DUMP,
-                            )
-                        if ALARM_TG_REQUIRE_PHOTO and not jpeg:
-                            return
-
-                        photo_file = None
-                        if jpeg:
-                            alarm_id = dt_txt.replace(":", "_").replace(" ", "_")
-                            photo_file = save_alarm_photo(alarm_id, jpeg)
-
-                        with alarm_store["lock"]:
-                            for a in alarm_store["alarms"]:
-                                if a.get("file") == entry.get("FileName"):
-                                    a["photo_file"] = photo_file
-                                    a["size"] = len(jpeg) if jpeg else 0
-                                    a["photo_meta"] = meta
-                                    break
-
-                        text = f"🚨 {type_name}\n🕐 {dt_txt}\n📼 {entry.get('FileName', '')}"
-                        send_telegram(text, jpeg)
-
-                    alarm_executor.submit(job_hist)
-                    tg_count += 1
-                    if notify_key:
-                        alarm_store["notified_event_keys"].add(notify_key)
-
-            if new_count > 0:
-                log.info(
-                    "История: +%d тревог из OPFileQuery, TG отправок: +%d",
-                    new_count,
-                    tg_count,
-                )
-            elif ALARM_POLL_LOG_EVERY_TICK:
-                log.info("History poll: новых тревог нет")
-
-            with alarm_store["lock"]:
-                alarm_store["last_check"] = now.isoformat()
-
-        except Exception as e:
-            log.warning(f"History poll ошибка: {e}")
-        finally:
-            if cam:
-                try:
-                    cam.close()
-                except Exception:
-                    pass
-
-        time.sleep(ALARM_POLL_INTERVAL)
+    log.info(
+        "Yellow box alerts enabled "
+        f"(check={YELLOW_BOX_CHECK_INTERVAL_SEC}s, "
+        f"rate={YELLOW_BOX_TELEGRAM_RATE_PER_MINUTE}/min, "
+        f"queue={YELLOW_BOX_TELEGRAM_QUEUE_SIZE})"
+    )
+    return telegram_queue, monitor
 
 
 # ─── HTTP маршруты ─────────────────────────────────────────────────────────────
@@ -1152,6 +690,7 @@ def alarm_history_poll_loop():
 
 @app.route("/")
 def index():
+    """Отдаёт основной HTML-интерфейс."""
     return send_from_directory(".", "index.html")
 
 
@@ -1164,6 +703,7 @@ def stream():
         cam_mode = "full"
 
     def crop_bgr(bgr, mode: str):
+        """Обрезает BGR-кадр под выбранный режим просмотра."""
         if mode == "full" or bgr is None:
             return bgr
         h = int(bgr.shape[0])
@@ -1177,6 +717,7 @@ def stream():
         return bgr
 
     def to_jpeg_bytes(bgr) -> bytes | None:
+        """Кодирует BGR-кадр в JPEG-байты."""
         if bgr is None:
             return None
         ok, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
@@ -1185,6 +726,7 @@ def stream():
         return jpeg.tobytes()
 
     def generate():
+        """Генерирует multipart MJPEG-ответ для браузера."""
         state.clients += 1
         log.info(f"Клиент подключился (всего: {state.clients})")
         try:
@@ -1289,104 +831,24 @@ def api_status():
     return jsonify(state.to_dict())
 
 
-@app.route("/alarms")
-def api_alarms():
-    """JSON со списком тревог."""
-    limit = request.args.get("limit", 50, type=int)
-    with alarm_store["lock"]:
-        return jsonify(
-            {
-                "alarms": alarm_store["alarms"][:limit],
-                "total": len(alarm_store["alarms"]),
-                "last_check": alarm_store["last_check"],
-            }
-        )
-
-
-@app.route("/alarm_photo")
-def alarm_photo():
-    """
-    Фото тревоги. Приоритет:
-      1. Сохранённый JPEG на диске (alarm_photos/)
-      2. Извлечение из архивного motion-ролика (DVRIP DownloadStart + decode)
-      3. Текущий кадр стрима (fallback)
-    ?file=...&start=...&end=...
-    """
-    fname = request.args.get("file", "")
-    start = request.args.get("start", "")
-    end = request.args.get("end", "")
-    if not start:
-        return "Нет данных", 400
-
-    # Ищем тревогу в хранилище по имени файла
-    alarm_entry = None
-    with alarm_store["lock"]:
-        for a in alarm_store["alarms"]:
-            if a.get("file") == fname or a.get("time") == start:
-                alarm_entry = dict(a)  # копия
-                break
-
-    if not alarm_entry:
-        alarm_entry = {"file": fname, "time": start, "end_time": end or start}
-
-    data = get_alarm_photo_bytes(alarm_entry)
-    if data:
-        return Response(
-            data, mimetype="image/jpeg", headers={"Cache-Control": "max-age=3600"}
-        )
-
-    # Если фото нет, но есть file/time — пробуем вытянуть архивное фото на лету.
-    try:
-        t = _parse_dt(alarm_entry.get("time", ""))
-        if t and state.camera_ip:
-            jpeg, meta = extract_alarm_photo_from_motion(
-                state.camera_ip, t, debug=False
-            )
-            if jpeg:
-                alarm_id = t.strftime("%Y-%m-%d_%H_%M_%S")
-                photo_file = save_alarm_photo(alarm_id, jpeg)
-                # обновим запись в store
-                with alarm_store["lock"]:
-                    for a in alarm_store["alarms"]:
-                        if a.get("file") == alarm_entry.get("file") or a.get(
-                            "time"
-                        ) == alarm_entry.get("time"):
-                            a["photo_file"] = photo_file
-                            a["size"] = len(jpeg)
-                            a["photo_meta"] = meta
-                            break
-                return Response(
-                    jpeg,
-                    mimetype="image/jpeg",
-                    headers={"Cache-Control": "max-age=3600"},
-                )
-    except Exception as e:
-        log.warning(f"alarm_photo on-demand extraction failed: {e}")
-
-    return "Фото недоступно", 404
-
-
 # ─── Точка входа ──────────────────────────────────────────────────────────────
 
 
 def main():
+    """Запускает фоновый захват камеры и Flask-сервер."""
     log.info("=" * 50)
     log.info("  Stream Viewer — запуск")
     log.info("=" * 50)
 
+    _yellow_box_alert_workers = start_yellow_box_alerts()
+
     capture_thread = threading.Thread(target=capture_loop, daemon=True, name="capture")
     capture_thread.start()
-
-    alarm_hist_thread = threading.Thread(
-        target=alarm_history_poll_loop, daemon=True, name="alarm_history"
-    )
-    alarm_hist_thread.start()
 
     log.info(f"Веб-интерфейс: http://localhost:{WEB_PORT}")
     log.info(f"MJPEG поток:   http://localhost:{WEB_PORT}/stream")
     log.info(f"Снимок:        http://localhost:{WEB_PORT}/snapshot")
     log.info(f"Статус JSON:   http://localhost:{WEB_PORT}/status")
-    log.info(f"Тревоги JSON:  http://localhost:{WEB_PORT}/alarms")
     if should_enable_push(REMOTE_PUSH_URL):
         log.info(
             f"Remote push:   {REMOTE_PUSH_URL} (ffmpeg={FFMPEG_BIN}, codec={REMOTE_PUSH_CODEC}, stream={REMOTE_PUSH_STREAM_INDEX})"
