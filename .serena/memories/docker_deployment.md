@@ -6,9 +6,22 @@
 (→ `open_browser.ps1 -Url http://mac-mini.tail8eadef.ts.net:5050/`, Mac mini в Tailscale; LAN-адрес тоже работает). Раньше всё шло на ноутбуке через `start.bat`, и он грелся.
 
 Автозапуск на Lenovo (с 2026-11-21): `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\camera_viewer.bat`
-→ `call ...\Desktop\ip-cam-monitor\open_viewer.bat`. Старый ярлык на `start.bat` (локальный сервер + браузер)
-перенесён в `C:\Users\Admin\startup_backup\` (`start - Ярлык.lnk`); чтобы вернуть локальный режим, верни его обратно.
-Через SSH кириллица в именах файлов не читается — используй короткие имена (`dir /x`).
+→ свёрнутый `cmd` с `...\Desktop\ip-cam-monitor\open_viewer.bat`. Старый ярлык на `start.bat` (локальный сервер + браузер)
+лежит в `C:\Users\Admin\startup_backup\` (`start - Ярлык.lnk`); вернуть его обратно — значит вернуть локальный режим.
+Через SSH кириллица в именах файлов не читается, используй короткие имена (`dir /x`).
+
+`open_viewer.bat`: адрес — сначала mDNS `http://Mac-mini-Vladislav.local:5050` (LAN напрямую, роутер не настраиваем;
+Tailscale на Windows тратил ~16% ядра на шифрование потока), запасной — `http://mac-mini.tail8eadef.ts.net:5050`.
+Плеер — mpv (`C:\Users\Admin\tools\mpv\mpv.exe`, сборка shinchiro 20261111, v0.42.0) fullscreen, `--demuxer-lavf-format=mpjpeg --untimed`,
+перезапуск в цикле; без mpv открывается Edge kiosk через `open_browser.ps1`. `VIEWER_DRY_RUN=1` — проверка без запуска.
+На Lenovo нет winget, а Windows `tar` не распаковывает 7z (нет LZMA): архив распаковывался на Mac, переупаковывался в zip и
+копировался `scp lenovo:` (на Mac есть `Host lenovo` в ~/.ssh/config).
+
+Облегчение Windows на Lenovo (2026-11-21): отключены WSearch, SysMain, DiagTrack, Spooler, CDPSvc, OneSyncSvc;
+убран автозапуск OneDrive; политики Edge StartupBoost/BackgroundMode=0, DeliveryOptimization без P2P, Cortana/Bing off,
+активные часы Windows Update 06–23, VisualFX «быстродействие». Откат: `C:\Users\Admin\startup_backup\restore_tweaks.bat`
+(+ `hkcu_run_backup.reg`). Предел заряда батареи не выставлен: нет Lenovo Vantage/драйвера питания. AutoAdminLogon=0.
+Chrome Remote Desktop (`remoting_network`) при активной сессии ест ~половину ядра.
 
 Файлы:
 - `Dockerfile` — python:3.12-slim, `requirements-docker.txt` (opencv-python-headless), non-root user,

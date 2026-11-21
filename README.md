@@ -62,16 +62,25 @@ docker compose down
 
 ### Ноутбук как экран (Windows)
 
-Python на ноутбуке не нужен. Скопируй `open_viewer.bat` и `open_browser.ps1` в одну папку и запусти:
+Python на ноутбуке не нужен. Нужны `open_viewer.bat`, `open_browser.ps1` и (рекомендуется) [mpv](https://mpv.io/installation/)
+— распакуй сборку в `C:\Users\Admin\tools\mpv` или задай путь в `MPV_EXE`.
 
 ```bat
 open_viewer.bat
-open_viewer.bat http://192.168.100.13:5050/
+open_viewer.bat http://192.168.100.13:5050
 ```
 
-По умолчанию открывается `http://mac-mini.tail8eadef.ts.net:5050/` (Mac mini в Tailscale), так что адрес
-не зависит от IP в локальной сети. Скрипт дождётся, пока сервер станет доступен, и откроет Edge/Chrome в kiosk-режиме.
-Для автозапуска положи в автозагрузку Windows (`shell:startup`) ярлык на `open_viewer.bat` вместо `start.bat`.
+Как работает:
+
+- Адрес сервера: сначала `http://Mac-mini-Vladislav.local:5050` (mDNS, прямой путь по локальной сети,
+  без настройки роутера), если не ответил — `http://mac-mini.tail8eadef.ts.net:5050` (Tailscale).
+- Плеер: mpv на весь экран показывает `/stream?cam=full` (режим меняется через `VIEWER_CAM=top|bottom`).
+  Это один процесс на ~100 МБ вместо ~700 МБ у Edge. При обрыве mpv закрывается, и скрипт переподключается.
+- Если mpv нет — открывается Edge/Chrome в kiosk-режиме, как раньше.
+- `VIEWER_DRY_RUN=1` — только показать выбранный адрес и плеер (удобно проверять по SSH).
+
+Для автозапуска положи в автозагрузку Windows (`shell:startup`) батник
+`start "" /min cmd /c ""C:\путь\к\open_viewer.bat""` вместо ярлыка на `start.bat`.
 
 ## Переменные окружения
 
