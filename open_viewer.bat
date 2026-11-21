@@ -10,6 +10,8 @@ setlocal EnableExtensions
 :: Переменные окружения (необязательно):
 ::   MPV_EXE      — путь к mpv.exe (по умолчанию C:\Users\Admin\tools\mpv\mpv.exe или mpv из PATH)
 ::   VIEWER_CAM   — режим кадра: full | top | bottom (по умолчанию full)
+::   VIEWER_SIZE  — разрешение экрана WxH (по умолчанию 1920x1080): сервер сам растягивает
+::                  кадр ровно под экран, как раньше в браузере; 0 — сохранять пропорции
 ::   VIEWER_DRY_RUN=1 — только показать выбранный адрес и плеер, ничего не запускать
 title Camera Viewer
 cd /d "%~dp0"
@@ -22,6 +24,7 @@ set "URL_LAN=http://Mac-mini-Vladislav.local:5050"
 set "URL_TS=http://mac-mini.tail8eadef.ts.net:5050"
 if not "%~1"=="" set "URL_LAN=%~1"
 if not defined VIEWER_CAM set "VIEWER_CAM=full"
+if not defined VIEWER_SIZE set "VIEWER_SIZE=1920x1080"
 
 :: Ищем mpv: явный путь, затем папка по умолчанию, затем PATH
 if not defined MPV_EXE set "MPV_EXE=C:\Users\Admin\tools\mpv\mpv.exe"
@@ -43,25 +46,35 @@ if not defined BASE_URL (
 )
 echo Server: %BASE_URL%
 
+:: Растяжение на весь экран делает сервер (size=WxH): ноут получает кадр ровно
+:: под свой экран и ничего не масштабирует. --keepaspect=no — подстраховка в mpv.
+set "STREAM_URL=%BASE_URL%/stream?cam=%VIEWER_CAM%&size=%VIEWER_SIZE%"
+set "KEEPASPECT=no"
+if "%VIEWER_SIZE%"=="0" (
+  set "STREAM_URL=%BASE_URL%/stream?cam=%VIEWER_CAM%"
+  set "KEEPASPECT=yes"
+)
+
 :: Режим проверки (например, по SSH): показать выбор и выйти, ничего не запуская
 if "%VIEWER_DRY_RUN%"=="1" (
-  echo DRY RUN: player="%MPV_EXE%" url="%BASE_URL%/stream?cam=%VIEWER_CAM%"
+  echo DRY RUN: player="%MPV_EXE%" url="%STREAM_URL%" keepaspect=%KEEPASPECT%
   if exist "%MPV_EXE%" (echo DRY RUN: mpv found) else (echo DRY RUN: mpv missing, would open browser)
   goto :eof
 )
 
 if not exist "%MPV_EXE%" goto browser
 
-echo Starting mpv: %BASE_URL%/stream?cam=%VIEWER_CAM%
+:: URL в кавычках: иначе "&" в нём cmd примет за разделитель команд
+echo Starting mpv: "%STREAM_URL%"
 :: --untimed: у MJPEG нет таймстемпов, показываем кадр сразу как пришёл.
 :: --network-timeout: зависшее соединение завершает mpv, и цикл переподключается.
 :: --cursor-autohide=always: курсор не висит поверх картинки.
 :: mpv сам не даёт экрану погаснуть, пока идёт видео (stop-screensaver по умолчанию).
 start "" /wait "%MPV_EXE%" --no-config --fs --no-border --no-osc --osd-level=0 ^
-  --cursor-autohide=always --force-window=immediate --title="Camera" ^
+  --cursor-autohide=always --force-window=immediate --title="Camera" --keepaspect=%KEEPASPECT% ^
   --demuxer-lavf-format=mpjpeg --profile=low-latency --untimed --cache=no ^
   --hwdec=no --network-timeout=10 --keep-open=no --idle=no --really-quiet ^
-  "%BASE_URL%/stream?cam=%VIEWER_CAM%"
+  "%STREAM_URL%"
 :: mpv закрылся (обрыв потока, рестарт сервера или Esc/q) — пауза и заново.
 :: Адрес выбираем повторно: вдруг mDNS или Tailscale отвалились.
 echo mpv exited, reconnecting in 3s...

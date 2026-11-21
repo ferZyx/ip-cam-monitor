@@ -246,17 +246,27 @@ class CameraState:
         with self.lock:
             return self.frame_bgr
 
-    def get_stream_jpeg(self, cam_mode: str) -> bytes | None:
-        """Возвращает уменьшенный JPEG последнего кадра для MJPEG-потока (с кэшем по кадру)."""
+    def get_stream_jpeg(
+        self,
+        cam_mode: str,
+        exact_size: tuple[int, int] | None = None,
+    ) -> bytes | None:
+        """
+        Возвращает JPEG последнего кадра для MJPEG-потока (с кэшем по кадру).
+
+        exact_size=(w, h) — растянуть кадр ровно под экран клиента (без сохранения
+        пропорций); иначе — уменьшить в рамку STREAM_MAX_WIDTH x STREAM_MAX_HEIGHT.
+        """
         with self.lock:
             count, jpeg, bgr = self.frame_count, self.frame, self.frame_bgr
         if jpeg is None:
             return None
 
         # Кодирование под отдельным lock: захват кадров не ждёт, а параллельные
-        # клиенты одного режима получают уже готовый результат из кэша
+        # клиенты одного режима и размера получают уже готовый результат из кэша
+        cache_key = f"{cam_mode}:{exact_size[0]}x{exact_size[1]}" if exact_size else cam_mode
         with self.stream_cache_lock:
-            cached = self.stream_cache.get(cam_mode)
+            cached = self.stream_cache.get(cache_key)
             if cached is not None and cached[0] == count:
                 return cached[1]
             out = build_stream_jpeg(
@@ -266,8 +276,9 @@ class CameraState:
                 max_width=STREAM_MAX_WIDTH,
                 max_height=STREAM_MAX_HEIGHT,
                 quality=STREAM_JPEG_QUALITY,
+                exact_size=exact_size,
             )
-            self.stream_cache[cam_mode] = (count, out)
+            self.stream_cache[cache_key] = (count, out)
             return out
 
     def set_status(self, status: str, error: str = ""):
@@ -316,6 +327,24 @@ def crop_frame(bgr, cam_mode: str):
     return bgr
 
 
+def parse_stream_size(value: str | None) -> tuple[int, int] | None:
+    """
+    Разбирает размер кадра из query-параметра `size` вида `1920x1080`.
+
+    Возвращает (ширина, высота) или None, если значение пустое/некорректное
+    либо выходит за разумные пределы (16..4096 по каждой стороне).
+    """
+    if not value:
+        return None
+    parts = value.lower().strip().split("x")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    width, height = int(parts[0]), int(parts[1])
+    if not (16 <= width <= 4096 and 16 <= height <= 4096):
+        return None
+    return width, height
+
+
 def build_stream_jpeg(
     jpeg_bytes: bytes,
     bgr,
@@ -323,14 +352,17 @@ def build_stream_jpeg(
     max_width: int,
     max_height: int,
     quality: int,
+    exact_size: tuple[int, int] | None = None,
 ) -> bytes:
     """
     Готовит JPEG для браузера: обрезка по режиму, уменьшение в рамку
     max_width x max_height (без увеличения, с сохранением пропорций) и
-    перекодирование с quality. При любой ошибке возвращает исходный JPEG.
+    перекодирование с quality. Если задан exact_size=(w, h), кадр растягивается
+    ровно до этого размера без сохранения пропорций — клиенту не нужно ничего
+    масштабировать. При любой ошибке возвращает исходный JPEG.
     """
     # Полный кадр без ограничений по размеру — отдаём исходник без перекодирования
-    if cam_mode == "full" and max_width <= 0 and max_height <= 0:
+    if cam_mode == "full" and max_width <= 0 and max_height <= 0 and not exact_size:
         return jpeg_bytes
 
     if bgr is None:
@@ -345,6 +377,15 @@ def build_stream_jpeg(
 
     out = crop_frame(bgr, cam_mode)
     h, w = out.shape[:2]
+
+    if exact_size:
+        # Растяжение под экран клиента (аналог object-fit: fill в браузере).
+        # При уменьшении площади — INTER_AREA, при увеличении — INTER_LINEAR.
+        target_w, target_h = exact_size
+        interpolation = cv2.INTER_AREA if target_w * target_h < w * h else cv2.INTER_LINEAR
+        out = cv2.resize(out, (target_w, target_h), interpolation=interpolation)
+        ok, encoded = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return encoded.tobytes() if ok else jpeg_bytes
 
     # Масштаб = самое жёсткое из ограничений; больше 1 не бывает (не увеличиваем)
     scale = 1.0
@@ -820,11 +861,17 @@ def index():
 
 @app.route("/stream")
 def stream():
-    """MJPEG-поток для <img> тега."""
+    """
+    MJPEG-поток для <img> тега или плеера.
+
+    Параметры: cam=full|top|bottom — режим кадра; size=WxH — растянуть кадр
+    ровно под экран клиента (например, для mpv на ноутбуке-мониторе).
+    """
 
     cam_mode = (request.args.get("cam", "full") or "full").lower()
     if cam_mode not in {"full", "top", "bottom"}:
         cam_mode = "full"
+    exact_size = parse_stream_size(request.args.get("size"))
 
     def generate():
         """Генерирует multipart MJPEG-ответ для браузера (уменьшенные кадры)."""
@@ -834,7 +881,7 @@ def stream():
             while True:
                 state.frame_event.wait(timeout=2.0)
                 # Обрезка и уменьшение уже сделаны на сервере — браузер только показывает JPEG
-                out_jpeg = state.get_stream_jpeg(cam_mode)
+                out_jpeg = state.get_stream_jpeg(cam_mode, exact_size)
                 if out_jpeg is None:
                     continue
 

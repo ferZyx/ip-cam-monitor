@@ -13,6 +13,7 @@
 `open_viewer.bat`: адрес — сначала mDNS `http://Mac-mini-Vladislav.local:5050` (LAN напрямую, роутер не настраиваем;
 Tailscale на Windows тратил ~16% ядра на шифрование потока), запасной — `http://mac-mini.tail8eadef.ts.net:5050`.
 Плеер — mpv (`C:\Users\Admin\tools\mpv\mpv.exe`, сборка shinchiro 20261111, v0.42.0) fullscreen, `--demuxer-lavf-format=mpjpeg --untimed`,
+`/stream?size=1920x1080` (VIEWER_SIZE) — сервер растягивает кадр ровно под экран Lenovo (раньше Edge делал `object-fit: fill`), `--keepaspect=no`;
 перезапуск в цикле; без mpv открывается Edge kiosk через `open_browser.ps1`. `VIEWER_DRY_RUN=1` — проверка без запуска.
 На Lenovo нет winget, а Windows `tar` не распаковывает 7z (нет LZMA): архив распаковывался на Mac, переупаковывался в zip и
 копировался `scp lenovo:` (на Mac есть `Host lenovo` в ~/.ssh/config).

@@ -3,7 +3,7 @@ import unittest
 import cv2
 import numpy as np
 
-from server import build_stream_jpeg, crop_frame
+from server import build_stream_jpeg, crop_frame, parse_stream_size
 
 
 def _decode_shape(jpeg_bytes: bytes) -> tuple[int, int]:
@@ -60,6 +60,33 @@ class StreamDownscaleTests(unittest.TestCase):
         """Битый JPEG без BGR не роняет поток — возвращаются исходные байты."""
         broken = b"not a jpeg"
         self.assertIs(build_stream_jpeg(broken, None, "top", 1920, 1080, 80), broken)
+
+    def test_exact_size_stretches_full_frame_to_screen(self):
+        """size=1920x1080 растягивает полный кадр ровно под экран (как object-fit: fill)."""
+        out = build_stream_jpeg(
+            self.jpeg, self.bgr, "full", 1920, 1080, 80, exact_size=(1920, 1080)
+        )
+        self.assertEqual(_decode_shape(out), (1080, 1920))
+
+    def test_exact_size_applies_after_crop(self):
+        """Для половины кадра растяжение идёт после обрезки."""
+        out = build_stream_jpeg(
+            self.jpeg, self.bgr, "bottom", 0, 0, 80, exact_size=(1280, 720)
+        )
+        self.assertEqual(_decode_shape(out), (720, 1280))
+
+    def test_exact_size_upscales_small_frame(self):
+        """Маленький кадр (sub-поток) тоже доводится до размера экрана."""
+        bgr, jpeg = _make_frame(720, 640)
+        out = build_stream_jpeg(jpeg, bgr, "full", 1920, 1080, 80, exact_size=(1920, 1080))
+        self.assertEqual(_decode_shape(out), (1080, 1920))
+
+    def test_parse_stream_size(self):
+        """Разбор size=WxH: корректные значения, мусор и границы."""
+        self.assertEqual(parse_stream_size("1920x1080"), (1920, 1080))
+        self.assertEqual(parse_stream_size(" 1280X720 "), (1280, 720))
+        for bad in (None, "", "1920", "1920x", "x1080", "axb", "-1x10", "8x8", "5000x1000"):
+            self.assertIsNone(parse_stream_size(bad), bad)
 
     def test_crop_frame_halves(self):
         """crop_frame делит кадр по высоте пополам."""
