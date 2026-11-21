@@ -5,6 +5,11 @@
 2026-11-21 его `.env` совпадал с `.env` на Mac mini) — только экран: браузер в kiosk-режиме через `open_viewer.bat`
 (→ `open_browser.ps1 -Url http://mac-mini.tail8eadef.ts.net:5050/`, Mac mini в Tailscale; LAN-адрес тоже работает). Раньше всё шло на ноутбуке через `start.bat`, и он грелся.
 
+Автозапуск на Lenovo (с 2026-11-21): `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\camera_viewer.bat`
+→ `call ...\Desktop\ip-cam-monitor\open_viewer.bat`. Старый ярлык на `start.bat` (локальный сервер + браузер)
+перенесён в `C:\Users\Admin\startup_backup\` (`start - Ярлык.lnk`); чтобы вернуть локальный режим, верни его обратно.
+Через SSH кириллица в именах файлов не читается — используй короткие имена (`dir /x`).
+
 Файлы:
 - `Dockerfile` — python:3.12-slim, `requirements-docker.txt` (opencv-python-headless), non-root user,
   HEALTHCHECK по `/status`; build-arg `INSTALL_FFMPEG=1` нужен только для REMOTE_PUSH.
