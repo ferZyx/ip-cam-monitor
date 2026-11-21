@@ -1,0 +1,29 @@
+# Секреты: .env подключается через env_file в compose, в образ не копируется
+.env
+.env.*
+
+# Окружения и кэши
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Репозиторий, IDE, агенты
+.git/
+.idea/
+.vscode/
+.serena/
+temp/
+
+# Медиа, эксперименты, логи
+alarm_photos/
+bad_alarm_photos/
+experiments/
+*.h264
+*.bin
+*.log
+
+# Windows-обвязка ноутбука
+*.bat
+*.ps1

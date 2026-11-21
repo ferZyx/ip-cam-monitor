@@ -24,6 +24,55 @@ start.bat
 
 - `http://localhost:5050`
 
+## Запуск в Docker (Mac mini как сервер)
+
+Вся тяжёлая работа (RTSP-декодирование, JPEG, детектор, Telegram) идёт в контейнере
+на Mac mini, а остальные устройства в сети только открывают страницу в браузере.
+
+1) Установи Docker Desktop и включи в настройках *Start Docker Desktop when you sign in*.
+   В macOS отключи сон (Настройки → Аккумулятор/Энергия → не переходить в режим сна).
+
+2) Заполни `.env` (как для локального запуска). Для Docker важно:
+   - `CAMERA_SCAN_SUBNET` — подсеть домашней сети (по умолчанию в compose `192.168.100`),
+     иначе поиск камеры при смене её IP пойдёт по внутренней сети Docker;
+   - `TZ` — часовой пояс для логов (по умолчанию `Asia/Almaty`);
+   - `INSTALL_FFMPEG=1` — только если нужен `REMOTE_PUSH_URL`.
+
+3) Сборка и запуск:
+
+```bash
+docker compose up -d --build
+```
+
+4) Открыть с любого устройства в сети: `http://<IP Mac mini>:5050`
+   (на Mac mini: `ipconfig getifaddr en0`). IP Mac mini лучше закрепить в роутере.
+
+Полезное:
+
+```bash
+docker compose logs -f
+docker compose ps
+docker compose down
+```
+
+- Контейнер перезапускается сам (`restart: unless-stopped`), логи ротируются (3×10 МБ).
+- В образ попадают только runtime-файлы; `.env` подключается через `env_file` и в образ не копируется.
+- Используется `opencv-python-headless` (`requirements-docker.txt`). Аппаратного
+  декодирования Apple в Docker нет, декодирование идёт на CPU, для одной камеры это немного.
+
+### Ноутбук как экран (Windows)
+
+Python на ноутбуке не нужен. Скопируй `open_viewer.bat` и `open_browser.ps1` в одну папку и запусти:
+
+```bat
+open_viewer.bat
+open_viewer.bat http://192.168.100.13:5050/
+```
+
+По умолчанию открывается `http://mac-mini.tail8eadef.ts.net:5050/` (Mac mini в Tailscale), так что адрес
+не зависит от IP в локальной сети. Скрипт дождётся, пока сервер станет доступен, и откроет Edge/Chrome в kiosk-режиме.
+Для автозапуска положи в автозагрузку Windows (`shell:startup`) ярлык на `open_viewer.bat` вместо `start.bat`.
+
 ## Переменные окружения
 
 Смотри `stream_viewer/.env.example`.
@@ -33,6 +82,17 @@ start.bat
 - `CAMERA_IP`
 - `CAMERA_USER`
 - `CAMERA_PASS`
+
+Поиск камеры:
+
+- `CAMERA_SCAN_SUBNET` (пусто по умолчанию: подсеть берётся из IP машины; в Docker задавай явно, например `192.168.100`)
+
+MJPEG-поток для браузера:
+
+- `STREAM_MAX_WIDTH` / `STREAM_MAX_HEIGHT` (`1920` / `1080` по умолчанию) — сервер обрезает и уменьшает кадр
+  в эту рамку с сохранением пропорций, браузер получает готовую картинку под экран. `0` — без ограничения.
+- `STREAM_JPEG_QUALITY` (`80` по умолчанию) — качество JPEG в `/stream`.
+- `/snapshot` и фото в Telegram по-прежнему в полном разрешении камеры.
 
 Telegram (опционально):
 

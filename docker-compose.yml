@@ -1,0 +1,29 @@
+# Запуск сервера камеры на Mac mini (Docker Desktop).
+# Браузеры в локальной сети открывают http://<IP Mac mini>:5050
+services:
+  ip-cam-monitor:
+    build:
+      context: .
+      args:
+        # 1 — добавить ffmpeg в образ (нужен только для REMOTE_PUSH_URL)
+        INSTALL_FFMPEG: ${INSTALL_FFMPEG:-0}
+    image: ip-cam-monitor:latest
+    container_name: ip-cam-monitor
+    # Самовосстановление при падении и автозапуск вместе с Docker Desktop
+    restart: unless-stopped
+    # Камера, Telegram и прочие настройки — из того же .env, что и при локальном запуске
+    env_file: .env
+    environment:
+      # Внутри контейнера свой IP (сеть Docker), поэтому подсеть домашней сети
+      # задаём явно. Переопределяется переменной CAMERA_SCAN_SUBNET в .env.
+      CAMERA_SCAN_SUBNET: ${CAMERA_SCAN_SUBNET:-192.168.100}
+      TZ: ${TZ:-Asia/Almaty}
+    ports:
+      # 0.0.0.0 — порт доступен всем устройствам локальной сети
+      - "5050:5050"
+    # Ротация логов: контейнер работает 24/7, без лимита лог разрастается
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

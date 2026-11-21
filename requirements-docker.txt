@@ -1,0 +1,8 @@
+# Зависимости для Docker-образа (Linux arm64/amd64, без GUI).
+# Отличие от requirements.txt: opencv-python-headless вместо opencv-python —
+# сервер не открывает окон, а headless-сборка легче и не тянет X11/OpenGL.
+flask>=3.0
+opencv-python-headless>=4.8
+python-dotenv>=1.0
+numpy>=1.24
+python-dvr>=0.0.1

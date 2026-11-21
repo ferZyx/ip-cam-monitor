@@ -117,6 +117,9 @@ KNOWN_IP = os.getenv("CAMERA_IP", "192.168.100.9")
 CAMERA_USER = os.getenv("CAMERA_USER", "admin")
 CAMERA_PASS = os.getenv("CAMERA_PASS", "")
 DVRIP_PORT = _env_int("DVRIP_PORT", 34567)
+# Подсеть для поиска камеры (например, 192.168.100). Нужна в Docker:
+# внутри контейнера собственный IP не совпадает с подсетью домашней сети.
+CAMERA_SCAN_SUBNET = os.getenv("CAMERA_SCAN_SUBNET", "").strip()
 RTSP_PORT = _env_int("RTSP_PORT", 554)
 
 WEB_HOST = "0.0.0.0"
@@ -126,6 +129,13 @@ JPEG_QUALITY = 92  # Качество MJPEG (1-100), 92 = почти без по
 RECONNECT_DELAY = 3  # Секунд между переподключениями
 SCAN_TIMEOUT = 0.3  # Таймаут порт-сканирования
 MAX_FPS = 7  # Камера даёт ~6.6fps
+
+# MJPEG для браузера: кадр уменьшается на сервере, чтобы браузер не декодировал
+# 6-мегапиксельные JPEG. 0 — без ограничения по стороне. /snapshot и Telegram
+# по-прежнему получают полноразмерный кадр.
+STREAM_MAX_WIDTH = _env_int("STREAM_MAX_WIDTH", 1920)
+STREAM_MAX_HEIGHT = _env_int("STREAM_MAX_HEIGHT", 1080)
+STREAM_JPEG_QUALITY = max(1, min(100, _env_int("STREAM_JPEG_QUALITY", 80)))
 
 # Telegram (оставить пустым чтобы отключить)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -212,6 +222,10 @@ class CameraState:
         self.uptime_start: float | None = None
         self.frame_count: int = 0
         self.clients: int = 0
+        # Кэш уменьшенных JPEG для /stream: {cam_mode: (frame_count, jpeg)}.
+        # Каждый кадр кодируется один раз на режим, сколько бы клиентов ни смотрело.
+        self.stream_cache: dict[str, tuple[int, bytes]] = {}
+        self.stream_cache_lock = threading.Lock()
 
     def set_frame(self, jpeg_bytes: bytes, bgr_frame=None):
         """Сохраняет последний кадр и будит клиентов MJPEG-потока."""
@@ -231,6 +245,30 @@ class CameraState:
         """Возвращает последний BGR-кадр, если он доступен."""
         with self.lock:
             return self.frame_bgr
+
+    def get_stream_jpeg(self, cam_mode: str) -> bytes | None:
+        """Возвращает уменьшенный JPEG последнего кадра для MJPEG-потока (с кэшем по кадру)."""
+        with self.lock:
+            count, jpeg, bgr = self.frame_count, self.frame, self.frame_bgr
+        if jpeg is None:
+            return None
+
+        # Кодирование под отдельным lock: захват кадров не ждёт, а параллельные
+        # клиенты одного режима получают уже готовый результат из кэша
+        with self.stream_cache_lock:
+            cached = self.stream_cache.get(cam_mode)
+            if cached is not None and cached[0] == count:
+                return cached[1]
+            out = build_stream_jpeg(
+                jpeg,
+                bgr,
+                cam_mode,
+                max_width=STREAM_MAX_WIDTH,
+                max_height=STREAM_MAX_HEIGHT,
+                quality=STREAM_JPEG_QUALITY,
+            )
+            self.stream_cache[cam_mode] = (count, out)
+            return out
 
     def set_status(self, status: str, error: str = ""):
         """Обновляет статус камеры и время аптайма трансляции."""
@@ -263,6 +301,68 @@ class CameraState:
         }
 
 
+def crop_frame(bgr, cam_mode: str):
+    """Обрезает BGR-кадр под режим просмотра: full — целиком, top/bottom — половина."""
+    if cam_mode == "full" or bgr is None:
+        return bgr
+    h = int(bgr.shape[0])
+    if h < 2:
+        return bgr
+    mid = h // 2
+    if cam_mode == "top":
+        return bgr[:mid, :, :]
+    if cam_mode == "bottom":
+        return bgr[mid:, :, :]
+    return bgr
+
+
+def build_stream_jpeg(
+    jpeg_bytes: bytes,
+    bgr,
+    cam_mode: str,
+    max_width: int,
+    max_height: int,
+    quality: int,
+) -> bytes:
+    """
+    Готовит JPEG для браузера: обрезка по режиму, уменьшение в рамку
+    max_width x max_height (без увеличения, с сохранением пропорций) и
+    перекодирование с quality. При любой ошибке возвращает исходный JPEG.
+    """
+    # Полный кадр без ограничений по размеру — отдаём исходник без перекодирования
+    if cam_mode == "full" and max_width <= 0 and max_height <= 0:
+        return jpeg_bytes
+
+    if bgr is None:
+        try:
+            import numpy as np
+
+            bgr = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception:
+            bgr = None
+    if bgr is None:
+        return jpeg_bytes
+
+    out = crop_frame(bgr, cam_mode)
+    h, w = out.shape[:2]
+
+    # Масштаб = самое жёсткое из ограничений; больше 1 не бывает (не увеличиваем)
+    scale = 1.0
+    if max_width > 0:
+        scale = min(scale, max_width / w)
+    if max_height > 0:
+        scale = min(scale, max_height / h)
+    if scale < 1.0:
+        new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        # INTER_AREA — лучшее качество при уменьшении, без муара
+        out = cv2.resize(out, new_size, interpolation=cv2.INTER_AREA)
+
+    ok, encoded = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        return jpeg_bytes
+    return encoded.tobytes()
+
+
 state = CameraState()
 remote_relay = RemotePushRelay(
     ffmpeg_bin=FFMPEG_BIN,
@@ -292,6 +392,29 @@ def get_local_ip() -> str:
         return "192.168.100.1"
 
 
+def resolve_scan_subnet(override: str, local_ip: str) -> str:
+    """
+    Возвращает первые три октета подсети /24 для поиска камеры.
+
+    Если override задан корректно (`192.168.100`, `192.168.100.` или
+    `192.168.100.0/24`), используется он. Иначе подсеть берётся из local_ip.
+    """
+    candidate = (override or "").strip()
+    if candidate:
+        # Отбрасываем маску и хвостовую точку, оставляем первые три октета
+        candidate = candidate.split("/", 1)[0].rstrip(".")
+        parts = candidate.split(".")
+        if len(parts) == 4 and parts[3] == "0":
+            parts = parts[:3]
+        if len(parts) == 3 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            return ".".join(str(int(p)) for p in parts)
+        log.warning(
+            f"CAMERA_SCAN_SUBNET='{override}' некорректна — использую подсеть {local_ip}"
+        )
+
+    return ".".join(local_ip.split(".")[:3])
+
+
 def check_port(ip: str, port: int, timeout: float = SCAN_TIMEOUT) -> bool:
     """Проверяет открыт ли порт."""
     try:
@@ -308,7 +431,8 @@ def discover_camera() -> str | None:
     """
     Находит камеру в локальной сети.
     1. Сначала проверяет последний известный IP
-    2. Если не найден — сканирует подсеть по порту 34567 (DVRIP — уникален для Xiongmai)
+    2. Если не найден — сканирует подсеть по порту 34567 (DVRIP — уникален для Xiongmai).
+       Подсеть берётся из CAMERA_SCAN_SUBNET или из IP текущей машины.
     """
     log.info(f"Проверяю известный IP: {KNOWN_IP}...")
     if check_port(KNOWN_IP, DVRIP_PORT, timeout=1.0):
@@ -316,7 +440,7 @@ def discover_camera() -> str | None:
         return KNOWN_IP
 
     local_ip = get_local_ip()
-    subnet = ".".join(local_ip.split(".")[:3])
+    subnet = resolve_scan_subnet(CAMERA_SCAN_SUBNET, local_ip)
     log.info(f"Камера не на {KNOWN_IP}. Сканирую {subnet}.0/24 (порт {DVRIP_PORT})...")
     state.set_status("scanning")
 
@@ -702,56 +826,17 @@ def stream():
     if cam_mode not in {"full", "top", "bottom"}:
         cam_mode = "full"
 
-    def crop_bgr(bgr, mode: str):
-        """Обрезает BGR-кадр под выбранный режим просмотра."""
-        if mode == "full" or bgr is None:
-            return bgr
-        h = int(bgr.shape[0])
-        if h < 2:
-            return bgr
-        mid = h // 2
-        if mode == "top":
-            return bgr[:mid, :, :]
-        if mode == "bottom":
-            return bgr[mid:, :, :]
-        return bgr
-
-    def to_jpeg_bytes(bgr) -> bytes | None:
-        """Кодирует BGR-кадр в JPEG-байты."""
-        if bgr is None:
-            return None
-        ok, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-        if not ok:
-            return None
-        return jpeg.tobytes()
-
     def generate():
-        """Генерирует multipart MJPEG-ответ для браузера."""
+        """Генерирует multipart MJPEG-ответ для браузера (уменьшенные кадры)."""
         state.clients += 1
         log.info(f"Клиент подключился (всего: {state.clients})")
         try:
             while True:
                 state.frame_event.wait(timeout=2.0)
-                frame_jpeg = state.get_frame()
-                if frame_jpeg is None:
+                # Обрезка и уменьшение уже сделаны на сервере — браузер только показывает JPEG
+                out_jpeg = state.get_stream_jpeg(cam_mode)
+                if out_jpeg is None:
                     continue
-
-                out_jpeg = frame_jpeg
-                if cam_mode != "full":
-                    bgr = state.get_frame_bgr()
-                    if bgr is None:
-                        try:
-                            import numpy as np
-
-                            arr = np.frombuffer(frame_jpeg, dtype=np.uint8)
-                            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                        except Exception:
-                            bgr = None
-
-                    out_bgr = crop_bgr(bgr, cam_mode)
-                    maybe = to_jpeg_bytes(out_bgr)
-                    if maybe:
-                        out_jpeg = maybe
 
                 yield (
                     b"--frame\r\n"
@@ -808,12 +893,8 @@ def snapshot():
             frame_jpeg, mimetype="image/jpeg", headers={"Cache-Control": "no-cache"}
         )
 
-    h = int(bgr.shape[0])
-    mid = h // 2 if h >= 2 else 0
-    if cam_mode == "top":
-        bgr = bgr[:mid, :, :]
-    elif cam_mode == "bottom":
-        bgr = bgr[mid:, :, :]
+    # /snapshot отдаёт кадр в полном разрешении — для скачивания и разбора деталей
+    bgr = crop_frame(bgr, cam_mode)
 
     ok, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     if not ok:
@@ -846,7 +927,10 @@ def main():
     capture_thread.start()
 
     log.info(f"Веб-интерфейс: http://localhost:{WEB_PORT}")
-    log.info(f"MJPEG поток:   http://localhost:{WEB_PORT}/stream")
+    log.info(
+        f"MJPEG поток:   http://localhost:{WEB_PORT}/stream "
+        f"(max {STREAM_MAX_WIDTH}x{STREAM_MAX_HEIGHT}, quality={STREAM_JPEG_QUALITY})"
+    )
     log.info(f"Снимок:        http://localhost:{WEB_PORT}/snapshot")
     log.info(f"Статус JSON:   http://localhost:{WEB_PORT}/status")
     if should_enable_push(REMOTE_PUSH_URL):
