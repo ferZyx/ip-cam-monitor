@@ -196,7 +196,9 @@ if QUIET_HTTP_ACCESS_LOGS:
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Принудительный TCP для RTSP (стабильнее UDP)
-# + таймауты на уровне ffmpeg (уменьшает зависания при потере пакетов)
+# + таймауты на уровне ffmpeg (уменьшает зависания при потере пакетов).
+# stimeout новые FFmpeg (OpenCV 5.x) молча игнорируют — рабочие таймауты
+# открытия/чтения задаются в build_capture_params().
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
     "rtsp_transport;tcp|stimeout;5000000|max_delay;500000"
 )
@@ -529,15 +531,32 @@ def build_rtsp_url(ip: str, stream: int = 0) -> str:
 # ─── Захват: RTSP ─────────────────────────────────────────────────────────────
 
 
+RTSP_OPEN_TIMEOUT_MSEC = 15000  # Таймаут открытия RTSP-потока
+
+
+def build_capture_params(read_timeout_sec: int = RTSP_NO_FRAME_TIMEOUT_SEC) -> list[int]:
+    """
+    Параметры открытия cv2.VideoCapture: таймауты открытия и чтения кадра.
+
+    Бэкенд FFmpeg принимает таймауты только при открытии — cap.set() после
+    открытия игнорируется, и чтение висит до 30 с по умолчанию OpenCV.
+    Таймаут чтения равен порогу переподключения, чтобы зависший read()
+    не растягивал пропадание картинки.
+    """
+    read_timeout_msec = max(1, read_timeout_sec) * 1000
+    return [
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_OPEN_TIMEOUT_MSEC,
+        cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_timeout_msec,
+    ]
+
+
 def try_rtsp(ip: str) -> cv2.VideoCapture | None:
     """Пробует подключиться к RTSP. Main-stream первый — максимальное качество."""
     for stream, label in [(0, "main"), (1, "sub")]:
         url = build_rtsp_url(ip, stream)
         log.info(f"RTSP {label}: {url}")
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, build_capture_params())
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 10)
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 15000)
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 15000)
 
         if cap.isOpened():
             ret, frame = cap.read()
