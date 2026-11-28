@@ -162,7 +162,10 @@ YELLOW_BOX_TELEGRAM_RATE_PER_MINUTE = _env_int(
 YELLOW_BOX_TELEGRAM_QUEUE_SIZE = _env_int("YELLOW_BOX_TELEGRAM_QUEUE_SIZE", 20)
 
 # RTSP stability
-RTSP_NO_FRAME_TIMEOUT_SEC = _env_int("RTSP_NO_FRAME_TIMEOUT_SEC", 15)
+# Сколько секунд без кадров ждать до переподключения. Камера по Wi-Fi иногда
+# полностью замолкает; при 15 с картинка пропадала ~20 с, при 5 с — ~10 с.
+# Обычные паузы камеры — до ~2.5 с, поэтому 5 с не даёт ложных переподключений.
+RTSP_NO_FRAME_TIMEOUT_SEC = _env_int("RTSP_NO_FRAME_TIMEOUT_SEC", 5)
 
 # Remote upstream push (optional)
 REMOTE_PUSH_URL = os.getenv("REMOTE_PUSH_URL", "").strip()
